@@ -181,10 +181,16 @@ cython_debug/
 .cursorindexingignore
 
 
-python3.11
-tasks
-test
-src
-# API_AUTH.md
-# CLAUDE.md
-# RENOVATION_PLAN.md
+# Local runtime & bundled Python
+python3.11/
+tasks/
+
+# Sensitive secrets (never commit real keys)
+.env
+
+# Test output artifacts & media files
+test/output/
+test/file/*.wav
+test/file/*.mp3
+test/file/*.srt
+test/comfyui/files/

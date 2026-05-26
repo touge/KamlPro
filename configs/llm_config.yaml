@@ -4,74 +4,42 @@
 # 声明大模型的底座提供商。包含本地微服务与云端 API 服务。
 # 支持 ${ENV_VAR} 语法加载环境变量中的密钥凭证。
 
-llm_providers:
+providers:
   # 🟢 本地离线推理服务 (Ollama)
   ollama:
+    type: "ollama"
     base_url: "http://127.0.0.1:11434"
     api_key: ""
-
-  # 🔵 线上 OpenAI 官方 API
-  openai:
-    base_url: "https://api.openai.com/v1"
-    api_key: "${OPENAI_API_KEY}"
+    models:
+      - name: "gemma3:12b"
+        tier: "sentinel"
+        display_name: "Gemma 3 (本地离线 / 12B)"
+      - name: "qwen3:14b"
+        tier: "sentinel"
+        display_name: "通义千问 3 (本地离线 / 14B)"
 
   # 🔵 线上 DeepSeek 官方 API (兼容 OpenAI 接口协议)
   deepseek:
-    base_url: "https://api.deepseek.com/v1"
+    type: "openai_compatible"
+    base_url: "https://api.deepseek.com"
     api_key: "${DEEPSEEK_API_KEY}"
+    models:
+      - name: "deepseek-v4-flash"
+        tier: "value"
+        display_name: "DeepSeek V4 Flash (极速 / 降本首选)"
+      - name: "deepseek-v4-pro"
+        tier: "premium"
+        display_name: "DeepSeek V4 Pro (高保真 / 旗舰思考)"
 
-  # 🔵 线上 Google Gemini 官方 API
-  google:
-    base_url: "https://generativelanguage.googleapis.com/v1beta"
-    api_key: "${GEMINI_API_KEY}"
-
+  # 🟠 自发现演示用的 Mock 提供商 (Drop & Play)
+  mock_test_provider:
+    type: "mock_test"
+    models:
+      - name: "mock-auto-model"
+        tier: "sentinel"
+        display_name: "Mock 自动发现模型"
 
 # ============================================================================
-# 统一模型注册中心
+# 全局大模型调度配置 (单层扁平化配置)
 # ============================================================================
-# 将本地与线上模型统一收归管理。前端通过 GET /interface/llm/models 获取此表。
-# 字段说明:
-#   name: 物理模型名称（需与提供商要求的模型名称完全一致，如 ollama 的 qwen3:8b 或 openai 的 gpt-4o）
-#   provider: 提供商标识，对应上方的 llm_providers 中的键名
-#   tier: 任务职责分级 — sentinel (本地免费离线) | value (云端性价比高) | premium (云端旗舰大脑)
-#   display_name: 前端友好显示名称，用于下拉框分组渲染
-
-llm_config:
-  models:
-    # --- 🟢 第一级：本地免费离线哨兵组 ---
-    - name: "qwen3:8b"
-      provider: "ollama"
-      tier: "sentinel"
-      display_name: "通义千问 3 (本地离线 / 8B)"
-    - name: "gemma3:12b"
-      provider: "ollama"
-      tier: "sentinel"
-      display_name: "Gemma 3 (本地离线 / 12B)"
-    - name: "qwen3:14b"
-      provider: "ollama"
-      tier: "sentinel"
-      display_name: "通义千问 3 (本地离线 / 14B)"
-
-    # --- 🔵 第二级：云端高性价比主力组 ---
-    - name: "gpt-4o-mini"
-      provider: "openai"
-      tier: "value"
-      display_name: "GPT-4o Mini (云端经济 / 降本首选)"
-    - name: "deepseek-chat"
-      provider: "deepseek"
-      tier: "value"
-      display_name: "DeepSeek V3 (云端经济 / 高保真)"
-    - name: "gemini-1.5-flash"
-      provider: "google"
-      tier: "value"
-      display_name: "Gemini 1.5 Flash (云端经济 / 1M视口)"
-
-    # --- 🟣 第三级：云端旗舰全能大脑组 ---
-    - name: "gpt-4o"
-      provider: "openai"
-      tier: "premium"
-      display_name: "GPT-4o (云端旗舰 / 视听大师)"
-    - name: "gemini-1.5-pro"
-      provider: "google"
-      tier: "premium"
-      display_name: "Gemini 1.5 Pro (云端旗舰 / 超强长文)"
+api_concurrency_limit: 1     # 云端 API 并发限制（设为 2 便于多轮排队测试）

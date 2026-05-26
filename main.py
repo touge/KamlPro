@@ -5,6 +5,10 @@ from pathlib import Path
 # 将项目根目录加入 sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# 最优先加载 .env 文件中的密钥，确保 yaml_config_loader 的 ${ENV_VAR} 展开能读到正确值
+from dotenv import load_dotenv
+load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=False)
+
 import uvicorn
 from src.logic.yaml_config_loader import yaml_config_loader
 from src.logic.platform_log_filter import setup_platform_log_filter

@@ -46,6 +46,39 @@ GET  /file/{service}/{path}      → httpx → 后端 → 流式返回前端
 
 详细使用指南：`API_AUTH.md`
 
+## LLM Provider 插件体系
+
+所有 LLM 调用路径统一经由 `src/core/providers/` 的插件化体系。**不要在 executor 中硬编码任何 LLM 地址或协议。**
+
+```
+src/core/providers/
+├── base.py              <- BaseLLMProvider 抽象基类
+├── manager.py           <- LLMProviderManager（pkgutil 自发现 + 单例）
+├── ollama.py            <- OllamaProvider  (@register_provider("ollama"))
+openai_compatible.py  <- OpenAICompatibleProvider (@register_provider("openai_compatible"))
+```
+
+**新增 Provider 三步走（零侵入）**：
+1. 在 `src/core/providers/` 新建 `.py` 文件
+2. 继承 `BaseLLMProvider`，实现 `generate()` + `generate_stream()`
+3. 用 `@register_provider("类型名")` 装饰类
+
+系统启动时自动发现，无需修改任何已有文件。`configs/llm_config.yaml` 中每个 provider 条目**必须**显式声明 `type` 字段，缺失则 `RuntimeError` 快速失败，严禁静默推导。
+
+**DeepSeek 推理透传**：`OpenAICompatibleProvider` 自动检测流式帧中的 `reasoning_content` 字段，将推理过程包裹为 `<think>...</think>` 标签透明混入正常流中，无需客户端感知。
+
+## 混合流式与并发调度
+
+`GET /interface/llm/generate-stream` 实现**排队心跳 + 推理流式**全程 SSE 长连接：
+
+- 排队阶段：每 500ms 发送 `{"status":"queued","position":N}` 心跳，连接不断
+- 获得槽位后：无缝切换为逐 Token 推送 `{"response":"...","done":false}`
+- 完成：推送 `{"response":"","done":true}`
+
+并发上限由 `configs/llm_config.yaml` 的 `api_concurrency_limit` 控制，`asyncio.Semaphore` 实现 FIFO 公平排队。
+
+详细架构与测试代码：`docs/KamlPro_混合流式与并发调度机制设计文档.md`
+
 ## 协议透传原则
 
 | 后端 | 后端原生协议 | Kalm 对前端协议 | 实现 |
@@ -77,7 +110,7 @@ GET  /file/{service}/{path}      → httpx → 后端 → 流式返回前端
   - `model_extensions.yaml` — 自定义 AIGC weights 及各类模型/图像/音视频文件后缀大一统过滤列表。
   - `services.yaml` — 后端子进程定义，采用多系统级联继承覆盖架构。支持 `auto_start`（Kalm启动时自动拉起常驻）及资源释放接口 `free_api`。
   - `tasks.yaml` — 任务类型（如 comfyui, tts, subtitle, llm）到后端服务与执行器的路由映射关系。
-  - `llm_config.yaml` — 大模型提供商（Ollama, OpenAI, DeepSeek, Google）基座凭证与统一模型注册中心分级表。
+  - `llm_config.yaml` — 大模型提供商注册中心（`providers:` 块）与并发调度参数（`api_concurrency_limit`）。**此文件含真实密钥，已在 `.gitignore` 中排除。** 初次部署请复制 `configs/llm_config.yaml.example` 并填入凭证。。
 - **装载与智能拆箱（Smart Unwrapper）**：
   - `yaml_config_loader.py` 支持在 `config.yaml` 中使用 `key: "configs/filename.yaml"` 极简键值直接映射。
   - 当子配置文件中含有同名 key 时，加载器会**全自动拆箱解套（Unwrap）**，完美保留了“外部文件有 key 易读”与“总配置无嵌套扁平”的优雅特性。
@@ -123,16 +156,18 @@ GET  /file/{service}/{path}      → httpx → 后端 → 流式返回前端
 ## 测试脚本
 
 | 脚本 | 说明 |
-|------|------| 
+|------|------|
+| `test/test_hybrid_stream.py` | **LLM 混合流式并发调度** 2x2 矩阵测试（流式/非流式 x 空闲/满队），含毫秒时间戳 |
 | `test/test_cross.py` | 交叉测试：多类型任务并发提交 + 自适应轮询 |
 | `test/test_serial.py` | 串行测试：逐个提交，等完成后下一个 |
 | `test/test_comfyui.py` | ComfyUI 图像生成端到端 |
 | `test/test_tts.py` | TTS 语音生成 + 可选字幕下载 |
 | `test/test_subtitle.py` | 独立字幕：上传本地音频 + 文稿 → SRT |
 | `test/test_tts_subtitle.py` | TTS 一条龙：`generate_subtitle: True` 同时产出音频+字幕 |
+| `test/test_ollama.py` | Ollama 本地模型直连测试 |
 | `test/_diag_subtitle.py` | 诊断脚本：快速验证 TTS+字幕链路 |
 
-产物统一输出到 `test/output/` 子目录。
+产物统一输出到 `test/output/` 子目录（已在 `.gitignore` 中排除）。
 
 ## 运行
 
