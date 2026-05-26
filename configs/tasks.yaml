@@ -1,0 +1,66 @@
+# ============================================================================
+# 任务类型 → 后端服务映射
+# ============================================================================
+# 定义每种任务类型对应的后端服务、追踪模式和执行器。
+#
+# 字段说明:
+#   service    - 对应 services.yaml 中定义的后端服务名称
+#   track_mode - 任务状态追踪方式:
+#                 ws     - WebSocket 实时推送（适合长时间任务，如图片生成）
+#                 poll   - 轮询查询（适合常规异步任务，如 TTS）
+#                 stream - 流式响应（适合需要实时输出的任务，如 LLM 对话）
+#   executor   - 执行器模块 and 函数，通过 importlib 动态加载
+
+tasks:
+
+  # --------------------------------------------------------------------------
+  # ComfyUI 图像生成任务
+  # --------------------------------------------------------------------------
+  comfyui:
+    service: "ComfyUI"            # 对应 services.yaml 中的 ComfyUI 通用服务定义 (自动命中平台脚本)
+    track_mode: ws                # WebSocket 模式：实时接收生成进度和结果
+    executor:
+      module: "src.core.executors.image"
+      function: "execute"
+
+  # --------------------------------------------------------------------------
+  # LLM 对话任务（非流式）
+  # --------------------------------------------------------------------------
+  llm:
+    service: "Ollama"             # 对应 services.yaml 中的 Ollama 服务定义
+    track_mode: poll              # 轮询模式：定期查询任务状态直到完成
+    has_outputs: false            # 内容直接封装在结果里，无可下载文件
+    executor:
+      module: "src.core.executors.llm"
+      function: "execute"
+
+  # --------------------------------------------------------------------------
+  # LLM 对话任务（流式）
+  # --------------------------------------------------------------------------
+  llm_streaming:
+    service: "Ollama"
+    track_mode: stream            # 流式模式：实时推送每个生成的 token
+    has_outputs: false            # 内容已经实时推送给客户端，无可下载文件
+    executor:
+      module: "src.core.executors.llm"
+      function: "execute_stream"
+
+  # --------------------------------------------------------------------------
+  # TTS 语音合成任务
+  # --------------------------------------------------------------------------
+  tts:
+    service: "TTS"                # 对应 services.yaml 中的 TTS 通用服务定义
+    track_mode: poll              # 轮询模式：等待合成完成后返回音频文件
+    executor:
+      module: "src.core.executors.tts"
+      function: "execute"
+
+  # --------------------------------------------------------------------------
+  # 字幕生成任务
+  # --------------------------------------------------------------------------
+  subtitle:
+    service: "TTS"                # 复用 TTS 服务（共享 Whisper 模型）
+    track_mode: poll
+    executor:
+      module: "src.core.executors.subtitle"
+      function: "execute"

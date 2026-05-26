@@ -1,0 +1,81 @@
+# ============================================================================
+# Kalm 后端子进程服务定义
+# ============================================================================
+# 字段说明：
+#   type             : 启动方式 — "cmd" 直接运行命令 / "ps1" 执行 PowerShell 脚本 / "sh" 执行 Linux bash 脚本
+#   host             : 服务监听地址（默认 127.0.0.1，仅本地可访问）
+#   port             : 服务监听端口（需与后端实际端口一致）
+#   ready_keyword    : 启动完成标志 — 匹配 stdout 中的关键词，出现后认为服务就绪
+#   manage_lifecycle : true = Kalm 管理该服务的启停 / false = 外部管理，Kalm 不干预
+#   stop_command     : (仅 cmd 类型) 自定义停止命令，用于优雅关闭而非直接 kill 进程
+#   token            : (可选) API 鉴权 token，Kalm 转发请求时会附带
+#   env              : (可选) 子进程环境变量，格式为 KEY: "value"
+#   free_api         : (可选) 资源释放接口配置，无此配置则跳过释放
+#     path            : 释放接口路径（如 /api/free），会拼接在 host:port 之后
+#     body            : POST 请求体（JSON），具体字段由后端服务决定
+#
+# 注意：V3 版本采用了级联继承覆盖设计。最外层配置公共参数，在 platforms 下根据
+#       当前运行操作系统（windows / linux / darwin）进行特异性差异覆盖。
+# ============================================================================
+
+# ============================================================================
+# Ollama 服务（跨平台，使用直接命令启动）
+# ============================================================================
+Ollama:
+  type: cmd
+  command: "ollama serve"
+  host: "http://127.0.0.1"
+  port: 11434
+  ready_keyword: "Listening"
+  stop_command: 'powershell -Command "Invoke-RestMethod -Uri http://127.0.0.1:11434/api/generate -Method Post -ContentType ''application/json'' -Body ''{\"model\": \"gemma3:12b\", \"prompt\": \"\", \"keep_alive\": 0, \"stream\": false, \"options\": {\"num_predict\": 0}}'' -ErrorAction SilentlyContinue"'
+  manage_lifecycle: true
+
+# ============================================================================
+# ComfyUI 图像生成服务 (级联配置)
+# ============================================================================
+ComfyUI:
+  host: "http://127.0.0.1"
+  port: 7001
+  ready_keyword: "To see the GUI go to"
+  manage_lifecycle: true
+  startup_timeout: 300
+  free_api:
+    path: "/api/free"
+    body:
+      unload_models: true
+      free_memory: true
+  
+  # 平台特异性覆盖与扩展
+  platforms:
+    windows:
+      type: ps1
+      path: "D:/AIGC/ComfyUI/run.ps1"
+    
+    linux:
+      type: sh
+      path: "/root/workspace/comfyui/run.sh"
+      env:
+        CUDA_VISIBLE_DEVICES: "0"
+        PYTHONUNBUFFERED: "1"
+
+# ============================================================================
+# TTS 语音合成与 Whispering 服务 (级联配置)
+# ============================================================================
+TTS:
+  host: "http://127.0.0.1"
+  port: 7002
+  token: "123456"
+  ready_keyword: "started"
+  manage_lifecycle: true
+  
+  # 平台特异性覆盖与扩展
+  platforms:
+    windows:
+      type: ps1
+      path: "D:/AIGC/Background_Tasks/IndexTTS-API/P8001.ps1"
+      
+    linux:
+      type: sh
+      path: "/root/workspace/indextts-api/p8001.sh"
+      env:
+        CUDA_VISIBLE_DEVICES: "0"

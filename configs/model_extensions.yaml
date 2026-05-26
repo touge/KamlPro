@@ -1,0 +1,68 @@
+# ============================================================================
+# Supported AIGC Model/File Suffixes
+# ============================================================================
+# Decoupled from hardcoded code list. You can add, edit or remove extensions
+# to match your local comfyui workflow path translation requirements.
+
+model_extensions:
+  # 权重与大模型
+  - "safetensors"
+  - "ckpt"
+  - "pt"
+  - "pth"
+  - "bin"
+  - "gguf"
+  - "ggml"
+  - "onnx"
+  - "engine"
+  - "trt"
+  - "tflite"
+  - "xml"
+  - "patch"
+  - "sft"
+  - "lora"
+  - "lycoris"
+  - "lokr"
+  - "loha"
+  - "glora"
+  - "dylora"
+  - "pkl"
+  - "h5"
+  - "pb"
+  - "hdf5"
+  - "ot"
+  - "torchscript"
+  - "msgpack"
+  
+  # 图像视觉
+  - "png"
+  - "jpg"
+  - "jpeg"
+  - "webp"
+  - "exr"
+  - "hdr"
+  - "gif"
+  - "bmp"
+  - "svg"
+  
+  # 视频
+  - "mp4"
+  - "webm"
+  - "mkv"
+  - "mov"
+  - "avi"
+  
+  # 音频
+  - "wav"
+  - "mp3"
+  - "flac"
+  - "m4a"
+  - "ogg"
+  
+  # 字幕与配置
+  - "txt"
+  - "srt"
+  - "vtt"
+  - "json"
+  - "yaml"
+  - "yml"

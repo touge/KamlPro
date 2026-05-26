@@ -179,3 +179,12 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+
+python3.11
+tasks
+test
+src
+# API_AUTH.md
+# CLAUDE.md
+# RENOVATION_PLAN.md
