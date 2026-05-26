@@ -1,8 +1,8 @@
-# Kalm
+# KamlPro
 
-纯 AI 任务中转控制站。前端 ↔ Kalm ↔ 后端服务（ComfyUI / TTS / Ollama）。
+AI 智能网关平台。前端 ↔ KamlPro ↔ 后端服务（ComfyUI / TTS / 云端API / 本地LLM）。
 
-核心原则：**透明代理 + FIFO 排队**。后端用什么协议，前端就用什么协议，Kalm 只做排队和透传，不做协议转换。
+核心原则：**双轨异步分流调度 + 统一 WebSocket 接口**。云端API支持并发线程池与流式直连，本地服务（LLM/TTS/ComfyUI）统一采用 poll 轮询模式，Kalm 后台轮询伪装成 WebSocket 对调用者透明。
 
 ## 快速开始
 
@@ -13,14 +13,33 @@ python main.py
 
 服务默认运行在 `http://localhost:7000`。
 
-## 四种代理通知模式
+## 双轨异步分流调度
 
-| 模式 | 端点 | 适用任务 | 说明 |
-|------|------|---------|------|
-| 队列广播 | `WS /interface/queue/ws` | 所有任务 | 全局广播：入队/开始/完成通知 |
-| 任务 WS | `WS /interface/tasks/{id}/ws` | 所有任务 | 实时进度（ws 透传 / poll 转发） |
-| multipart 上传 | `POST /interface/tasks/submit` (multipart/form-data) | `subtitle` | 上传音频文件 + 文稿 |
-| HTTP 流式 | `POST /interface/llm/generate-stream` | `llm_streaming` | NDJSON 逐 token 推送 |
+KamlPro 采用**双轨调度架构**，根据模型配置自动路由：
+
+| 轨道 | 后端类型 | 调度方式 | 流式支持 |
+|------|---------|---------|---------|
+| **本地 GPU 轨道** | Ollama 等本地推理 | FIFO 串行队列 | ❌ 仅 poll 模式 |
+| **云端 API 轨道** | DeepSeek / OpenAI 等 | ThreadPoolExecutor 并发 | ✅ 支持流式直连 |
+
+### 统一 WebSocket 接口
+
+所有后端服务（ComfyUI / TTS / 本地LLM）对调用者暴露**统一的 WebSocket 接口**：
+
+- 后端实际采用 HTTP poll 轮询执行
+- Kalm 后台轮询后端，将进度/结果通过 WebSocket **伪装成实时推送**发送给调用者
+- 调用者无需关心后端是 ws 还是 poll，统一使用 `WS /interface/tasks/{id}/ws` 获取进度
+
+### 云端 API 2×2 忙闲自适应矩阵
+
+| 响应模式 \ 队列状态 | 闲时直连 (Idle) | 忙时排队 (Busy) |
+|---------------------|-----------------|-----------------|
+| **流式 (Stream)** | 直接返回 HTTP 流 (`GET /tasks/{id}/stream`) | WS 监听 → 收到 `task_running` → 建立 HTTP 流 |
+| **非流式 (Poll)** | 轮询 `GET /tasks/{id}/status` 获取结果 | WS 监听 → 轮询获取结果 |
+
+提交任务时响应 `can_stream_immediately` 标志：
+- `true`：槽位空闲，可直接拉取流式响应
+- `false`：槽位已满，任务排队，需通过 WebSocket 监听出队信号
 
 ## API 端点
 
@@ -76,37 +95,107 @@ setInterval(() => { queueWs.send("ping"); }, 30000);
 
 ### 任务 WebSocket 进度
 
-ws 和 poll 模式统一：收到 `task_started` 后连接任务 WS 获取实时进度。
+**所有任务类型统一使用 WebSocket 获取实时进度**。Kalm 内部将不同后端协议统一为 WebSocket 推送：
 
 ```javascript
 const taskWs = new WebSocket(`ws://localhost:7000/interface/tasks/${taskId}/ws`);
 taskWs.onmessage = (e) => {
   const msg = JSON.parse(e.data);
-  // ws 模式(ComfyUI): 透传原生协议 {type: "executing", ...}
-  // poll 模式(TTS): Kalm 轮询转发的进度 {status: "running", ...}
+  // ComfyUI: 透传原生 ws 协议 {type: "executing", ...}
+  // TTS / 本地LLM: Kalm 后台 poll 轮询转发，伪装成 ws 推送 {status: "running", ...}
+  // 云端API排队: 等待 {type: "task_running"} 信号后切换到 HTTP 流
 };
 ```
 
-> 详细说明见 `docs/Kalm-队列WebSocket通知接口文档.md`
+> 详细说明见 `docs/KamlPro_混合流式与并发调度机制设计文档.md`
 
-### LLM 流式生成
+### LLM 任务提交
+
+通过统一任务提交端点提交 LLM 任务，`task_type` 区分流式与非流式：
 
 ```http
-POST /interface/llm/generate-stream
+POST /interface/tasks/submit
 Content-Type: application/json
 
-{ "model": "qwen3:14b", "prompt": "你好" }
+{
+  "task_type": "llm_streaming",   // 流式（仅云端API） / "llm"（非流式/poll）
+  "payload": {
+    "model": "deepseek-v4-flash",
+    "prompt": "你好",
+    "options": {"temperature": 0.7, "max_tokens": 100}
+  }
+}
 ```
 
-返回 `application/x-ndjson` 流，每行一个 JSON，与 Ollama 原生 `/api/generate (stream=true)` 协议一致。
+#### 云端 API — 流式任务 (`llm_streaming`)
 
-### LLM 非流式生成
+提交后根据并发槽位返回不同状态：
+
+**闲时直连（槽位未满）：**
+```json
+{
+  "task_id": "xxx",
+  "status": "running",
+  "can_stream_immediately": true
+}
+```
+客户端直接发起 HTTP 流式请求：
+```http
+GET /interface/tasks/{task_id}/stream
+```
+返回 `application/x-ndjson` 流，逐 token 推送。支持 `reasoning_content` 思考流，自动以 `<think>...</think>` 标签包装。
+
+**忙时排队（槽位已满）：**
+```json
+{
+  "task_id": "xxx",
+  "status": "queued",
+  "can_stream_immediately": false
+}
+```
+客户端通过 WebSocket 监听出队信号：
+```javascript
+const ws = new WebSocket(`ws://localhost:7000/interface/tasks/${taskId}/ws`);
+ws.onmessage = (e) => {
+  const msg = JSON.parse(e.data);
+  if (msg.type === 'task_running') {
+    // 收到起跑信号，立刻建立 HTTP 流式连接
+    fetch(`/interface/tasks/${taskId}/stream`)
+      .then(r => r.body.pipeThrough(new TextDecoderStream())
+        .pipeTo(new WritableStream({ write(chunk) { console.log(chunk); } })));
+  }
+};
+```
+
+#### 本地 LLM — 非流式任务 (`llm`)
+
+本地 LLM（如 Ollama）**仅支持 poll 模式**，使用方式与 TTS 完全一致：
 
 ```http
-POST /interface/llm/generate
+POST /interface/tasks/submit
 Content-Type: application/json
 
-{ "model": "qwen3:14b", "prompt": "你好" }
+{
+  "task_type": "llm",
+  "payload": {
+    "model": "qwen3:14b",
+    "prompt": "你好"
+  }
+}
+```
+
+通过统一 WebSocket 接口获取进度（Kalm 后台轮询转发，对调用者透明）：
+```javascript
+const ws = new WebSocket(`ws://localhost:7000/interface/tasks/${taskId}/ws`);
+ws.onmessage = (e) => {
+  const msg = JSON.parse(e.data);
+  // 等待 task_complete 后从 msg 中获取生成结果
+};
+```
+
+或轮询状态：
+```http
+GET /interface/tasks/{task_id}/status
 ```
 
 ### 模型列表
@@ -151,11 +240,12 @@ GET /file/{service_name}/{file_path}
 
 ## 后端服务
 
-| 服务 | 端口 | 协议 |
-|------|------|------|
-| ComfyUI | 7001 | HTTP + WebSocket |
-| Ollama | 11434 | HTTP |
-| TTS | 8001 | HTTP |
+| 服务 | 端口 | 协议 | 调度轨道 |
+|------|------|------|---------|
+| ComfyUI | 7001 | HTTP + WebSocket | 本地 GPU（FIFO） |
+| Ollama | 11434 | HTTP | 本地 GPU（FIFO, poll 模式） |
+| TTS | 8001 | HTTP | 本地 GPU（FIFO, poll 模式） |
+| 云端API | 依配置 | HTTP | 云端 API（并发线程池） |
 
 ## 测试
 
