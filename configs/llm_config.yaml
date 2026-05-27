@@ -32,12 +32,12 @@ providers:
         display_name: "DeepSeek V4 Pro (高保真 / 旗舰思考)"
 
   # 🟠 自发现演示用的 Mock 提供商 (Drop & Play)
-  mock_test_provider:
-    type: "mock_test"
-    models:
-      - name: "mock-auto-model"
-        tier: "sentinel"
-        display_name: "Mock 自动发现模型"
+  # mock_test_provider:
+  #   type: "mock_test"
+  #   models:
+  #     - name: "mock-auto-model"
+  #       tier: "sentinel"
+  #       display_name: "Mock 自动发现模型"
 
 # ============================================================================
 # 全局大模型调度配置 (单层扁平化配置)

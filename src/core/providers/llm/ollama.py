@@ -11,7 +11,7 @@ import requests
 import json
 from typing import Dict, Any
 
-from src.core.providers.base import BaseLLMProvider, register_provider
+from src.core.providers.llm.base import BaseLLMProvider, register_provider
 from src.core.service_controller import service_controller
 from src.core.task_manager import TaskManager
 from src.core.ws_manager import ws_manager

@@ -2,7 +2,7 @@
 """
 LLM 提供商自发现管理器 (LLMProviderManager)
 ===========================================
-利用 pkgutil 和 importlib 动态扫描 providers 文件夹下的所有 Python 文件，
+利用 pkgutil 和 importlib 动态扫描 providers/llm 文件夹下的所有 Python 文件，
 并结合 @register_provider 装饰器实现零代码修改、即插即用的自发现插件架构。
 """
 
@@ -13,7 +13,7 @@ from typing import Dict, Any, Type
 
 from src.logic.yaml_config_loader import yaml_config_loader
 from src.logic.logger import log
-from src.core.providers.base import BaseLLMProvider, PROVIDER_REGISTRY
+from src.core.providers.llm.base import BaseLLMProvider, PROVIDER_REGISTRY
 
 
 def _discover_providers():
@@ -31,7 +31,7 @@ def _discover_providers():
         if module_name in ("__init__", "base", "manager"):
             continue
 
-        import_path = f"src.core.providers.{module_name}"
+        import_path = f"src.core.providers.llm.{module_name}"
         try:
             importlib.import_module(import_path)
             log.info(f"[LLM Discovery] Auto-discovered and loaded LLM Provider module: '{import_path}'")

@@ -190,6 +190,7 @@ tasks/
 
 # Test output artifacts & media files
 test/output/
+test/*/outputs/
 test/file/*.wav
 test/file/*.mp3
 test/file/*.srt

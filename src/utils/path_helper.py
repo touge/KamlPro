@@ -92,12 +92,24 @@ def translate_workflow_paths(workflow: Any, target_os: str, base_mappings: Optio
     if isinstance(workflow, dict):
         new_dict = {}
         for k, v in workflow.items():
-            # 针对 ComfyUI 常见的路径字段名做智能识别
+            # 排除非路径常用键，避免误译（例如 MIME 类型 video/h264-mp4, 数学表达式 a/2 等）
+            if k.lower() in (
+                "format", "expression", "sampler_name", "scheduler", "mode", "type", 
+                "device", "codec", "pix_fmt", "method", "crop_position", 
+                "keep_proportion", "upscale_method"
+            ):
+                new_dict[k] = v
+                continue
+
+            # 针对 ComfyUI 常见的路径/模型字段名做智能识别
             if isinstance(v, str) and (
-                k.lower() in ("path", "file_path", "image_path", "model_path", "dir", "folder", "filename", "clip_name", "ckpt_name", "lora_name") or
-                # 检测值本身是否包含路径特征（如包含斜杠、盘符、或符合 AIGC_EXTENSIONS 后缀）
-                re.search(r'[/\\]', v) or
-                get_aigc_pattern().search(v)
+                k.lower() in (
+                    "path", "file_path", "image_path", "model_path", "dir", "folder", 
+                    "filename", "clip_name", "ckpt_name", "lora_name", "unet_name", 
+                    "vae_name", "clip_name1", "clip_name2", "filename_prefix", "model_name"
+                ) or
+                # 检测值本身符合 AIGC 权重后缀，且包含斜杠/反斜杠特征
+                (re.search(r'[/\\]', v) and get_aigc_pattern().search(v))
             ):
                 new_dict[k] = translate_path(v, target_os, base_mappings)
             else:
@@ -108,3 +120,4 @@ def translate_workflow_paths(workflow: Any, target_os: str, base_mappings: Optio
         return [translate_workflow_paths(item, target_os, base_mappings) for item in workflow]
         
     return workflow
+

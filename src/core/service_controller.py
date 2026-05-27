@@ -81,8 +81,7 @@ class _ServiceController:
             self.services[key] = merged_config
 
         # ---------- 从 config.yaml 读取 auto_start 服务列表 ----------
-        # 服务的自动启动由 config.yaml 中的 auto_start_services 配置控制
-        self.auto_start_services = yaml_config_loader.get("auto_start_services", [])
+        self.auto_start_services = yaml_config_loader.get("auto_start_services") or []
 
         # 项目根目录（main.py 的父目录）
         self.script_root = Path(__file__).resolve().parent.parent

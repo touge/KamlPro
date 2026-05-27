@@ -11,7 +11,7 @@ import threading
 import json
 from typing import Dict, Any
 
-from src.core.providers.manager import llm_provider_manager
+from src.core.providers.llm.manager import llm_provider_manager
 from src.core.task_manager import TaskManager
 from src.core.ws_manager import ws_manager
 from src.logic.logger import log

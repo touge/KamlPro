@@ -89,7 +89,7 @@ openai_compatible.py  <- OpenAICompatibleProvider (@register_provider("openai_co
 | TTS | HTTP 轮询 | HTTP 轮询 | `tts.py` + `tasks.py`（支持 `generate_subtitle: True` 同步生成字幕） |
 | 字幕 | multipart POST + HTTP 轮询 | multipart POST + HTTP 轮询 | `subtitle.py` + `tasks.py` |
 | 文件 | HTTP GET | HTTP GET | `file_proxy.py` |
-
+> **⚠️ 本地 Ollama 只能使用非流式接口**，若需要流式响应，请使用 `/interface/llm/generate-stream`（Kaml 代理后端）。
 ## 代码约定
 
 - 所有模块通过 `importlib.import_module` 动态加载，由 `config.yaml` 驱动。**不要静态导入 executor。**

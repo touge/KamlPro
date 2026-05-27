@@ -2,19 +2,14 @@
 """
 TTS 任务执行器
 ==============
-纯透传模式：接收前端 payload → 提交到 TTS 后端 → 轮询状态 → 原样透传结果。
+纯透传模式：接收前端 payload → 动态路由至配音 Audio Provider 并委托其执行合成流程。
 支持 generate_subtitle: True 同步生成字幕，产物通过 /static/{task_id}/{filename} 下载。
 """
 
-import requests
-import time
-from src.core.service_controller import service_controller
+from src.core.providers.audio.manager import audio_provider_manager
 from src.core.task_manager import TaskManager
 from src.core.ws_manager import ws_manager
 from src.logic.logger import log
-
-POLL_INTERVAL = 2
-MAX_POLL_SECONDS = 600
 
 
 def execute(task_id: str, **payload):
@@ -26,86 +21,32 @@ def execute(task_id: str, **payload):
       - text: str — 要合成的文本
       - speaker: str — 音色名称
       - generate_subtitle: bool (可选) — 是否同步生成 SRT 字幕
+      - provider: str (可选) — 配音服务提供商，默认为 'index_tts'
       - 其余字段原样 POST 给后端
     """
-    path = payload.pop("path", "/v1.5/generate")
-    service_name = payload.pop("_service_name", "TTS")
-
-    svc = service_controller.get_service_config(service_name)
-    if not svc:
-        TaskManager.update_task(task_id, TaskManager.STATUS_FAILED,
-            {"message": f"Service '{service_name}' not configured"})
-        return
-
-    base_url = f"{svc['host']}:{svc['port']}"
-    token = svc.get("token", "")
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
-
-    submit_url = f"{base_url}{path}"
-
-    log.info(f"[TTS Executor] Task {task_id}: submit to {submit_url}")
+    payload["task_id"] = task_id
+    provider_type = payload.get("provider", "index_tts")
 
     try:
+        log.info(f"[TTS Executor] >>> task_id={task_id} 初始化配音/语音合成任务...")
         TaskManager.update_task(task_id, TaskManager.STATUS_RUNNING,
             {"message": "Submitting to TTS service..."})
 
-        # 阶段一：提交
-        resp = requests.post(submit_url, json=payload, headers=headers, timeout=(5, 10))
-        if not resp.ok:
-            try:
-                detail = resp.json()
-            except Exception:
-                detail = resp.text[:200]
-            TaskManager.update_task(task_id, TaskManager.STATUS_FAILED,
-                {"message": f"TTS rejected: {resp.status_code}", "detail": detail})
-            return
+        provider = audio_provider_manager.get_provider(provider_type)
 
-        result = resp.json()
-        svc_task_id = result.get("data", {}).get("task_id")
-        if not svc_task_id:
-            TaskManager.update_task(task_id, TaskManager.STATUS_FAILED,
-                {"message": "TTS returned no task_id"})
-            return
+        def progress_callback(status_data: dict):
+            """将 TTS 实时生成进度消息透传到 TaskManager 和前端 WS"""
+            TaskManager.update_task(task_id, TaskManager.STATUS_RUNNING, result=status_data)
+            ws_manager.send(task_id, status_data)
 
-        log.info(f"[TTS Executor] Task {task_id} -> {svc_task_id}")
+        log.info(f"[TTS Executor] >>> task_id={task_id} 委托给提供商 '{provider_type}' 执行语音合成...")
+        status_data = provider.generate_speech(payload, progress_callback)
+        log.info(f"[TTS Executor] >>> task_id={task_id} 语音合成执行成功")
 
-        # 阶段二：轮询
-        elapsed = 0
-        while elapsed < MAX_POLL_SECONDS:
-            time.sleep(POLL_INTERVAL)
-            elapsed += POLL_INTERVAL
-
-            try:
-                sr = requests.get(
-                    f"{base_url}/status/{svc_task_id}",
-                    headers=headers, timeout=(5, 10),
-                )
-                if sr.status_code != 200:
-                    continue
-
-                status_data = sr.json()
-                svc_status = status_data.get("status")
-
-                TaskManager.update_task(task_id, TaskManager.STATUS_RUNNING, result=status_data)
-                ws_manager.send(task_id, status_data)
-
-                if svc_status == "failed":
-                    TaskManager.update_task(task_id, TaskManager.STATUS_FAILED, result=status_data)
-                    ws_manager.send(task_id, {"type": "task_failed", **status_data})
-                    return
-
-                if svc_status == "completed":
-                    log.info(f"[TTS Executor] Task {task_id} completed.")
-                    TaskManager.update_task(task_id, TaskManager.STATUS_SUCCESS, result=status_data)
-                    ws_manager.send(task_id, {"type": "task_complete", "status": "success", "result": status_data})
-                    return
-
-            except requests.RequestException as e:
-                log.warning(f"[TTS Executor] Task {task_id}: poll error: {e}")
-
-        TaskManager.update_task(task_id, TaskManager.STATUS_FAILED,
-            {"message": f"Polling timeout after {MAX_POLL_SECONDS}s"})
+        TaskManager.update_task(task_id, TaskManager.STATUS_SUCCESS, result=status_data)
+        ws_manager.send(task_id, {"type": "task_complete", "status": "success", "result": status_data})
 
     except Exception as e:
-        log.error(f"[TTS Executor] Task {task_id} failed: {e}", exc_info=True)
+        log.error(f"[TTS Executor] >>> Task {task_id} 语音合成失败: {e}", exc_info=True)
         TaskManager.update_task(task_id, TaskManager.STATUS_FAILED, {"message": str(e)})
+        ws_manager.send(task_id, {"type": "task_failed", "message": str(e)})

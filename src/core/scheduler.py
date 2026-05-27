@@ -96,7 +96,7 @@ class TaskScheduler:
         self.stream_events = {}  # task_id -> {"event": started_event, "queue": output_queue}
 
         # 初始化大模型底座提供商管理器
-        from src.core.providers.manager import llm_provider_manager
+        from src.core.providers.llm.manager import llm_provider_manager
         log.info(f"[Scheduler] LLM Provider Gateway initialized. Concurrency limit: {self.max_concurrent_api_tasks}")
 
         self._start_worker()
@@ -126,7 +126,7 @@ class TaskScheduler:
         # 判定是否为云端 API 任务 (通过大模型底座提供商路由判断，若不是 'ollama' 均路由至云端并行轨道)
         is_cloud_task = False
         if task_type in ("llm", "llm_streaming") and model_name:
-            from src.core.providers.manager import llm_provider_manager
+            from src.core.providers.llm.manager import llm_provider_manager
             provider_instance = llm_provider_manager.get_provider_for_model(model_name)
             if provider_instance and provider_instance.name != "ollama":
                 is_cloud_task = True
