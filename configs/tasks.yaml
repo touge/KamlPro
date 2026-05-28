@@ -24,10 +24,14 @@ tasks:
       function: "execute"
 
   # --------------------------------------------------------------------------
-  # LLM 对话任务（非流式）
+  # LLM 对话任务（非流式）—— 本地 Ollama 与云端模型共用
+  # --------------------------------------------------------------------------
+  # - 本地 Ollama: service + executor 均生效，调度器负责启停 Ollama 进程后调 executor
+  # - 云端模型 (DeepSeek 等): is_cloud_task 判定后走 _run_cloud_task 并发路径，
+  #   executor 用于加载 callable，service 不会被读取（不管理子进程）
   # --------------------------------------------------------------------------
   llm:
-    service: "Ollama"             # 对应 services.yaml 中的 Ollama 服务定义
+    service: "Ollama"             # 本地 Ollama 进程管理；云端路径不读此字段
     track_mode: ws                # 统一使用 WebSocket 实时获取状态
     has_outputs: false            # 内容直接封装在结果里，无可下载文件
     executor:
@@ -35,15 +39,19 @@ tasks:
       function: "execute"
 
   # --------------------------------------------------------------------------
-  # LLM 对话任务（流式）ollama本地禁止streaming模式。
+  # LLM 对话任务（流式）—— 仅云端模型使用，本地 Ollama 禁止
   # --------------------------------------------------------------------------
-  # llm_streaming:
-  #   service: "Ollama"
-  #   track_mode: stream            # 流式模式：实时推送每个生成的 token
-  #   has_outputs: false            # 内容已经实时推送给客户端，无可下载文件
-  #   executor:
-  #     module: "src.core.executors.llm"
-  #     function: "execute_stream"
+  # - 云端模型 (DeepSeek 等): is_cloud_task 判定后走 _run_cloud_task 并发路径，
+  #   executor 用于加载 execute_stream callable，service 不会被读取
+  # - 本地 Ollama: 自身不支持流式，禁止通过此任务类型调用
+  # --------------------------------------------------------------------------
+  llm_streaming:
+    service: "cloud"              # 占位，云端路径不读；本地若误调用会因无此服务定义而快速失败
+    track_mode: stream            # 流式模式：实时推送每个生成的 token
+    has_outputs: false            # 内容已经实时推送给客户端，无可下载文件
+    executor:
+      module: "src.core.executors.llm"
+      function: "execute_stream"
 
   # --------------------------------------------------------------------------
   # TTS 语音合成任务

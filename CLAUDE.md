@@ -160,22 +160,27 @@ openai_compatible.py  <- OpenAICompatibleProvider (@register_provider("openai_co
 
 ## 测试脚本 (20260527 统一重构版)
 
-为方便下游厂商与前端开发无缝接入，我们在 `test/20260527/` 目录下提供了一整套基于**“智能自适应 WS”**与**“纯 HTTP/REST 降级”**双轴对齐的高质量示范用例：
+为方便下游厂商与前端开发无缝接入，我们在 `test/20260527/` 目录下提供了一整套基于**”智能自适应 WS”**与**”纯 HTTP/REST 降级”**双轴对齐的高质量示范用例：
 
 ### 1. WebSocket 优先自适应接入示范 (最佳实践)
 这类用例在提交任务后，能根据网关返回的 `track_mode` 智能路由到 WebSocket 通道，并在发生配置变更时自动平滑降级。
 * `test/20260527/test_llm_local_ws.py` - **本地大模型 (Ollama) 自适应 WS 推送测试** (监听 `gemma3:12b`)
+* `test/20260527/test_llm_cloud_ws.py` - **云端大模型 (DeepSeek) 自适应 WS 推送测试** (监听 `deepseek-v4-flash`)
 * `test/20260527/test_hybrid_audio_ws.py` - **语音配音与字幕对齐自适应 WS 推送测试** (综合级联测试，下载 WAV 与 SRT)
 
 ### 2. 纯 HTTP REST 降级接入示范 (兜底/降级方案)
 此类用例专门为【不支持 WebSocket 协议的轻量级开发环境】准备。代码中包含大量的商业级架构设计说明与注释，演示如何忽略 `track_mode: ws` 推荐并直接强行进行 HTTP `/status` 状态轮询。
 * `test/20260527/test_llm_local_poll.py` - **本地大模型 (Ollama) 纯 HTTP 轮询测试** (强行轮询 /status)
+* `test/20260527/test_llm_cloud_poll.py` - **云端大模型 (DeepSeek) 纯 HTTP 轮询测试** (强行轮询 /status)
 * `test/20260527/test_hybrid_audio_poll.py` - **语音配音与字幕对齐纯 HTTP 轮询测试** (强行轮询并下载音频字幕)
 
-### 3. 其他核心测试用例
+### 3. 云端流式输出接入示范 (仅云端 API)
+云端模型独有的 SSE 流式逐 Token 推送模式。
+* `test/20260527/test_llm_cloud_stream.py` - **云端大模型 (DeepSeek) SSE 流式测试** (闲时直连/忙时排队 + 首字延迟 TTFT 展示)
+
+### 4. 其他核心测试用例
 * `test/20260527/test_comfyui_image.py` - ComfyUI 文生图采样进度 WS 推送（第一阶段：生成高清概念图）
 * `test/20260527/test_comfyui_video.py` - ComfyUI 图生视频采样进度 WS 推送（第二阶段：OS级跨目录文件拷贝并生成视频）
-* `test/20260527/test_llm_cloud.py` - 云端 API 并发/流式/轮询 2x2 忙闲矩阵自适应测试（SSE 流式首字延迟展示）
 * `test/20260527/test_providers_refactor.py` - 架构提供商层与执行器动态代理的 6 大模块单元测试
 
 测试产物统一分类归档并输出到 `test/20260527/outputs/` 的对应子目录下。

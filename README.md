@@ -249,16 +249,30 @@ GET /file/{service_name}/{file_path}
 
 ## 测试
 
+`test/20260527/` 目录提供完整的集成测试用例，覆盖本地/云端 LLM、TTS、ComfyUI 等所有任务类型。
+
+### LLM 测试矩阵
+
+| 用例 | 模型 | 追踪方式 | 说明 |
+|------|------|---------|------|
+| `test_llm_local_ws.py` | Ollama (gemma3:12b) | WS 自适应 | 本地大模型，根据 track_mode 智能选择 WS 或 poll |
+| `test_llm_local_poll.py` | Ollama (gemma3:12b) | HTTP 轮询 | 本地大模型，纯 HTTP 降级方案 |
+| `test_llm_cloud_ws.py` | DeepSeek (v4-flash) | WS 自适应 | 云端大模型，根据 track_mode 智能选择 WS 或 poll |
+| `test_llm_cloud_poll.py` | DeepSeek (v4-flash) | HTTP 轮询 | 云端大模型，纯 HTTP 降级方案 |
+| `test_llm_cloud_stream.py` | DeepSeek (v4-flash) | SSE 流式 | 云端大模型，流式逐 Token 推送 + TTFT 测量 |
+
+### 其他测试
+
 ```powershell
-# 独立字幕
-python test/test_subtitle.py
-# TTS + 字幕一条龙
-python test/test_tts_subtitle.py
-# 交叉并发测试
-python test/test_cross.py
+# ComfyUI 图像/视频生成
+python test/20260527/test_comfyui_image.py
+python test/20260527/test_comfyui_video.py
+# TTS + 字幕
+python test/20260527/test_hybrid_audio_ws.py
+python test/20260527/test_hybrid_audio_poll.py
 ```
 
-产物输出到 `test/output/` 下对应子目录。
+产物输出到 `test/20260527/outputs/` 下对应子目录。
 
 ## 配置
 
