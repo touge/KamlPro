@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-KamlPro 配音与字幕 (TTS & Subtitle) WebSocket 实时推送集成测试用例
-============================================================
-参考 test_hybrid_stream.py 风格，使用 websockets 与 httpx 实现高内聚的 WS 监听。
-
-测试流程：
-1. 提交 TTS 任务（语音合成），建立 WebSocket 监听直到收到完成信号，下载音频和字幕产物。
-2. 提交 Subtitle 任务（强制字幕对齐），建立 WebSocket 监听直到收到完成信号，下载字幕产物。
-3. 产物分类归档至 test/20260527/outputs/ 目录中。
+KamlPro 配音与字幕 (TTS & Subtitle) 自适应 WebSocket 实时推送集成测试用例
+========================================================================
+1. 根据协议，TTS 与 Subtitle 被动受本地 GPU 串行轨道调度。
+2. 本示例为【WebSocket 优先自适应接入规范】。
+3. 客户端在提交任务后，读取网关返回的 `track_mode`：
+   - 若为 "ws"：直接建立 WebSocket 管道实时接收网关伪装的完成信号。
+   - 若为 "poll"：智能自动降级采用 HTTP GET `/status` 周期轮询获取产物。
+4. 本用例能完美抵御后端任务配置变更，下游厂商可直接参考本脚本编写集成 SDK。
 """
 
 import asyncio
@@ -54,7 +54,7 @@ def log_info(msg: str, style: str = None):
 
 
 async def listen_task_via_ws(task_id: str, prefix: str = "[WS监听]") -> dict:
-    """建立 WebSocket 管道，被动接收网关推送的进度消息直到任务结束"""
+    """策略 1：建立 WebSocket 管道，被动接收网关推送的进度消息直到任务结束"""
     ws_uri = f"{WS_URL}/interface/tasks/{task_id}/ws"
     log_info(f"{prefix} 正在建立 WebSocket 实时监听通道: {ws_uri}", "yellow")
     
@@ -69,7 +69,7 @@ async def listen_task_via_ws(task_id: str, prefix: str = "[WS监听]") -> dict:
                 msg = json.loads(msg_str)
                 elapsed = asyncio.get_event_loop().time() - start_time
                 
-                # 打印接收到的 WS 推送消息帧
+                # 打印接收到的 WS 推送消息帧，方便前端观察真实的伪装 WS 数据结构
                 log_info(f"{prefix} 接收帧 ({elapsed:.1f}s): {msg}", "dim")
                 
                 msg_type = msg.get("type")
@@ -86,10 +86,37 @@ async def listen_task_via_ws(task_id: str, prefix: str = "[WS监听]") -> dict:
         raise e
 
 
+async def poll_task_status(task_id: str, prefix: str = "[HTTP轮询]") -> dict:
+    """策略 2 (自动降级)：异步轮询任务状态直到成功或失败"""
+    url = f"{BASE_URL}/interface/tasks/{task_id}/status"
+    start_time = asyncio.get_event_loop().time()
+    log_info(f"{prefix} 开始轮询任务 {task_id} 状态...", "yellow")
+    
+    async with httpx.AsyncClient() as client:
+        while True:
+            resp = await client.get(url, headers=HEADERS)
+            resp.raise_for_status()
+            task_data = resp.json().get("data", {})
+            status = task_data.get("status")
+            
+            elapsed = asyncio.get_event_loop().time() - start_time
+            log_info(f"{prefix} 任务 {task_id} 当前状态: {status} | 已轮询: {elapsed:.1f}s", "dim")
+            
+            if status == "success":
+                log_info(f"{prefix} 任务 {task_id} 执行成功！总耗时: {elapsed:.2f}s", "bold green")
+                return {"result": task_data.get("result", {})}
+            elif status == "failed":
+                err_msg = task_data.get("result", {}).get("message", "未知错误")
+                log_info(f"{prefix} 任务 {task_id} 执行失败: {err_msg}", "bold red")
+                raise RuntimeError(f"Task execution failed: {err_msg}")
+                
+            await asyncio.sleep(2.0)
+
+
 async def run_tts_scenario():
-    """TTS 语音合成场景测试 (WebSocket 接收)"""
+    """TTS 语音合成场景测试 (自适应路由)"""
     log_info("\n" + "=" * 60, "bold green")
-    log_info("场景 1: 提交 TTS 语音合成，WS 被动接收网关进度并下载产物", "bold green")
+    log_info("场景 1: 提交 TTS 语音合成，自适应策略接收网关进度并下载产物", "bold green")
     log_info("=" * 60, "bold green")
 
     # 创建输出目录
@@ -117,18 +144,24 @@ async def run_tts_scenario():
             return
 
         task_id = data.get("data", {}).get("task_id")
-        log_info(f"[TTS] 任务提交成功！分配 task_id: {task_id}", "bold green")
+        track_mode = data.get("data", {}).get("track_mode", "poll")
+        log_info(f"[TTS] 任务提交成功！分配 task_id: {task_id} | 路由 track_mode: {track_mode}", "bold green")
 
-        # ---- 通过 WebSocket 实时听取任务进度 ----
-        ws_msg = await listen_task_via_ws(task_id, prefix="[TTS WS]")
-        
-        # 任务成功结束，从推送结果提取后端 ID 执行文件保存
-        backend_info = ws_msg.get("result", {})
+        # ---- 自适应选择拉取策略 ----
+        if track_mode == "ws":
+            log_info("[TTS] 选择策略：通过 WebSocket 实时监听任务完成状态...", "cyan")
+            ws_msg = await listen_task_via_ws(task_id, prefix="[TTS WS]")
+            backend_info = ws_msg.get("result", {})
+        else:
+            log_info("[TTS] 选择策略：通过 HTTP /status 接口周期性轮询获取状态...", "cyan")
+            poll_res = await poll_task_status(task_id, prefix="[TTS 轮询]")
+            backend_info = poll_res.get("result", {})
+
         backend_data = backend_info.get("data", {})
         backend_tid = backend_data.get("task_id")
 
         if not backend_tid:
-            log_info("[TTS] [ERROR] 未能从 WS 推送结果中获取到后端真正 task_id", "bold red")
+            log_info("[TTS] [ERROR] 未能从推送/轮询结果中获取到后端真正 task_id", "bold red")
             return
 
         log_info(f"[TTS] 最终获取后端 task_id: {backend_tid}", "cyan")
@@ -167,9 +200,9 @@ async def run_tts_scenario():
 
 
 async def run_subtitle_scenario():
-    """Subtitle 强制字幕时间戳对齐场景测试 (WebSocket 接收)"""
+    """Subtitle 强制字幕时间戳对齐场景测试 (自适应路由)"""
     log_info("\n" + "=" * 60, "bold green")
-    log_info("场景 2: 上传本地 WAV 并提交对齐任务，WS 被动接收并下载字幕", "bold green")
+    log_info("场景 2: 上传本地 WAV 并提交对齐任务，自适应路由接收并下载字幕", "bold green")
     log_info("=" * 60, "bold green")
 
     # 创建输出目录
@@ -206,13 +239,19 @@ async def run_subtitle_scenario():
             return
 
         task_id = resp_data.get("data", {}).get("task_id")
-        log_info(f"[Subtitle] 任务提交成功！分配 task_id: {task_id}", "bold green")
+        track_mode = resp_data.get("data", {}).get("track_mode", "poll")
+        log_info(f"[Subtitle] 任务提交成功！分配 task_id: {task_id} | 路由 track_mode: {track_mode}", "bold green")
 
-        # ---- 通过 WebSocket 实时听取对齐进度 ----
-        ws_msg = await listen_task_via_ws(task_id, prefix="[Subtitle WS]")
+        # ---- 自适应选择对齐拉取策略 ----
+        if track_mode == "ws":
+            log_info("[Subtitle] 选择策略：通过 WebSocket 实时听取对齐进度...", "cyan")
+            ws_msg = await listen_task_via_ws(task_id, prefix="[Subtitle WS]")
+            backend_info = ws_msg.get("result", {})
+        else:
+            log_info("[Subtitle] 选择策略：通过 HTTP /status 接口周期性轮询...", "cyan")
+            poll_res = await poll_task_status(task_id, prefix="[Subtitle 轮询]")
+            backend_info = poll_res.get("result", {})
         
-        # 任务成功结束，从推送结果提取后端 ID 执行文件下载
-        backend_info = ws_msg.get("result", {})
         backend_data = backend_info.get("data", {})
         backend_tid = backend_data.get("task_id")
         
@@ -240,16 +279,16 @@ async def run_subtitle_scenario():
 
 async def main():
     log_info("==========================================================", "bold yellow")
-    log_info("   Kalm 音频与字幕 WS 集成测试客户端 (基于 websockets)    ", "bold yellow")
+    log_info("   Kalm 音频与字幕 WS-自适应集成测试客户端 (基于 websockets)  ", "bold yellow")
     log_info("==========================================================", "bold yellow")
     log_info(f"   目标网关地址 : {BASE_URL}")
     log_info(f"   WS 推送地址  : {WS_URL}")
     
     try:
-        # 1. 执行场景 1: TTS + WS 接收并保存
+        # 1. 执行场景 1: TTS 并下载产物
         await run_tts_scenario()
         
-        # 2. 执行场景 2: Subtitle + WS 接收并保存
+        # 2. 执行场景 2: Subtitle 并下载产物
         await run_subtitle_scenario()
         
     except httpx.ConnectError:

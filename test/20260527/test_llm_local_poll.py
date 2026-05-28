@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-KamlPro 本地离线大模型 (Ollama) 集成测试用例
-===========================================
-1. 根据协议，本地大模型推理仅支持打包轮询模式（Poll）。
-2. 提交非流式任务 (task_type="llm")，模型使用本地 "gemma3:12b"。
-3. 通过轮询 "/interface/tasks/{id}/status" 获取执行状态，展示本地冷启动与推理时间。
+KamlPro 本地离线大模型 (Ollama) HTTP 轮询集成测试用例 (纯 HTTP 降级与兜底方案)
+=============================================================================
+本示例专门为【不支持 WebSocket 长连接的轻量级客户端环境（如简单后端脚本、微服务、不便引入 WS 库的环境）】提供。
+虽网关对于本类型任务默认推荐/返回的 `track_mode` 可能是 `ws`，但由于客户端技术栈限制，客户端完全可以
+【忽略该 track_mode 推荐，直接强行采用本文件所演示的纯 HTTP 轮询 `/status` 接口】来安全获取产物，网关底层会进行无缝兼容。
 """
 
 import sys
@@ -66,10 +66,10 @@ async def poll_task_status(task_id: str, prefix: str = "[本地轮询]") -> dict
 
 async def main():
     log_info("==========================================================", "bold yellow")
-    log_info("        Kalm 本地离线大模型 (Ollama / Poll模式) 测试用例        ", "bold yellow")
+    log_info("    Kalm 本地离线大模型 (Ollama / 纯 HTTP 轮询模式) 测试用例    ", "bold yellow")
     log_info("==========================================================", "bold yellow")
     log_info(f"   目标模型     : {TEST_MODEL}")
-    log_info(f"   说明         : 本地模型仅支持 Poll 打包轮询模式")
+    log_info(f"   说明         : 纯 HTTP 轮询集成，忽略并绕过 track_mode 推荐直接轮询状态")
     
     prompt = "请用一句非常简短的话解释什么是量子计算。"
     url = f"{BASE_URL}/interface/tasks/submit"
@@ -88,9 +88,13 @@ async def main():
         async with httpx.AsyncClient() as client:
             resp = await client.post(url, json=payload, headers=HEADERS, timeout=10)
             resp.raise_for_status()
-            task_id = resp.json().get("data", {}).get("task_id")
-            log_info(f"[Local Stage] 任务提交成功！task_id: {task_id}", "bold green")
-
+            resp_data = resp.json()
+            task_id = resp_data.get("data", {}).get("task_id")
+            track_mode = resp_data.get("data", {}).get("track_mode", "poll")
+            
+            log_info(f"[Local Stage] 任务提交成功！task_id: {task_id} | 推荐 track_mode: {track_mode}", "bold green")
+            log_info(f"[Local Stage] [纯HTTP设计] 忽略推荐的 '{track_mode}' 模式，直接强行开启 HTTP /status 轮询...", "cyan")
+            
             # 轮询获取非流式返回结果
             task_data = await poll_task_status(task_id)
             result = task_data.get("result", {})
@@ -100,11 +104,11 @@ async def main():
                 duration_ns = result.get("total_duration")
                 duration_s = f"{duration_ns / 1e9:.2f}s" if duration_ns else "N/A"
                 
-                console.print(f"\n[bold yellow]─── 推理结果预览 (本地 Ollama) ───[/bold yellow]")
+                console.print(f"\n[bold yellow]─── 推理结果预览 (本地 Ollama / HTTP 轮询模式) ───[/bold yellow]")
                 console.print(text)
                 console.print(f"[dim]推理真实耗时 (Ollama 内核): {duration_s}[/dim]")
                 console.print("[bold yellow]──────────────────────────────────────────[/bold yellow]\n")
-                log_info("[Local Stage] 本地大模型 Poll 模式验证成功！", "bold green")
+                log_info("[Local Stage] 本地大模型纯 HTTP 轮询模式验证成功！", "bold green")
             else:
                 log_info("[Local Stage] 本地大模型任务执行失败", "bold red")
                 

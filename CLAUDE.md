@@ -79,17 +79,22 @@ openai_compatible.py  <- OpenAICompatibleProvider (@register_provider("openai_co
 
 详细架构与测试代码：`docs/KamlPro_混合流式与并发调度机制设计文档.md`
 
-## 协议透传原则
+## 协议透传与统一接口原则
 
-| 后端 | 后端原生协议 | Kalm 对前端协议 | 实现 |
+为了简化前端逻辑，网关采取 **“双轨制统一 WS 推送”** 理念：对需要排队的本地服务（ComfyUI 绘图、TTS 配音、Subtitle 字幕对齐、Ollama 本地大模型），网关统一通过 WS 代理伪装（`ws_proxy.py` 的后台轮询兜底）对前端暴露统一的 WebSocket 进度监听管道，使前端消费组件能够实现 100% 接口一致性。
+
+| 后端 | 后端原生协议 | 网关推荐前端协议 (YAML配置) | 真实底层实现 |
 |---|---|---|---|
-| ComfyUI | HTTP POST + WS 进度 | HTTP POST + WS 进度 | `image.py` + `ws_proxy.py` |
-| Ollama 流式 | HTTP NDJSON 流 | HTTP NDJSON 流 | `stream_proxy.py` |
-| Ollama 非流式 | HTTP 一次性 | HTTP 一次性 | `llm.py` |
-| TTS | HTTP 轮询 | HTTP 轮询 | `tts.py` + `tasks.py`（支持 `generate_subtitle: True` 同步生成字幕） |
-| 字幕 | multipart POST + HTTP 轮询 | multipart POST + HTTP 轮询 | `subtitle.py` + `tasks.py` |
-| 文件 | HTTP GET | HTTP GET | `file_proxy.py` |
-> **⚠️ 本地 Ollama 只能使用非流式接口**，若需要流式响应，请使用 `/interface/llm/generate-stream`（Kaml 代理后端）。
+| ComfyUI | HTTP POST + WS 进度 | **WebSocket (ws)** | `image.py` + 原生 WS 进度透传 |
+| Ollama 本地非流式 | HTTP 一次性 POST | **WebSocket (ws)** | `llm.py` + 网关后台代理轮询兜底推送 |
+| TTS 语音合成 | HTTP 轮询 | **WebSocket (ws)** | `tts.py` + 网关后台代理轮询兜底推送 |
+| 字幕强制对齐 | multipart POST + HTTP 轮询 | **WebSocket (ws)** | `subtitle.py` + 网关后台代理轮询兜底推送 |
+| 云端大模型流式 | HTTP SSE/NDJSON 流 | **流式 (stream)** | `/interface/tasks/{id}/stream` (并发限额直连) |
+| 云端大模型非流式 | HTTP 一次性 POST | **轮询 (poll)** | `/interface/tasks/{id}/status` (轻量无状态轮询) |
+| 文件访问代理 | HTTP GET | HTTP GET | `file_proxy.py` (资源读取通道) |
+
+> **⚠️ 本地 Ollama 只能使用非流式接口**，并且在网关 `tasks.yaml` 中其 `track_mode` 统一声明为 `ws`，由网关在后台代劳轮询并推送。若前端环境仅具备 HTTP REST 能力，允许忽略推荐并直接强行调 `/status` 接口轮询（网关全向向下兼容）。
+
 ## 代码约定
 
 - 所有模块通过 `importlib.import_module` 动态加载，由 `config.yaml` 驱动。**不要静态导入 executor。**
@@ -153,21 +158,27 @@ openai_compatible.py  <- OpenAICompatibleProvider (@register_provider("openai_co
 
 **心跳保活**：客户端每 30 秒发 `ping`，Kalm 回 `pong`，防止中间网络层断开空闲连接。
 
-## 测试脚本
+## 测试脚本 (20260527 统一重构版)
 
-| 脚本 | 说明 |
-|------|------|
-| `test/test_hybrid_stream.py` | **LLM 混合流式并发调度** 2x2 矩阵测试（流式/非流式 x 空闲/满队），含毫秒时间戳 |
-| `test/test_cross.py` | 交叉测试：多类型任务并发提交 + 自适应轮询 |
-| `test/test_serial.py` | 串行测试：逐个提交，等完成后下一个 |
-| `test/test_comfyui.py` | ComfyUI 图像生成端到端 |
-| `test/test_tts.py` | TTS 语音生成 + 可选字幕下载 |
-| `test/test_subtitle.py` | 独立字幕：上传本地音频 + 文稿 → SRT |
-| `test/test_tts_subtitle.py` | TTS 一条龙：`generate_subtitle: True` 同时产出音频+字幕 |
-| `test/test_ollama.py` | Ollama 本地模型直连测试 |
-| `test/_diag_subtitle.py` | 诊断脚本：快速验证 TTS+字幕链路 |
+为方便下游厂商与前端开发无缝接入，我们在 `test/20260527/` 目录下提供了一整套基于**“智能自适应 WS”**与**“纯 HTTP/REST 降级”**双轴对齐的高质量示范用例：
 
-产物统一输出到 `test/output/` 子目录（已在 `.gitignore` 中排除）。
+### 1. WebSocket 优先自适应接入示范 (最佳实践)
+这类用例在提交任务后，能根据网关返回的 `track_mode` 智能路由到 WebSocket 通道，并在发生配置变更时自动平滑降级。
+* `test/20260527/test_llm_local_ws.py` - **本地大模型 (Ollama) 自适应 WS 推送测试** (监听 `gemma3:12b`)
+* `test/20260527/test_hybrid_audio_ws.py` - **语音配音与字幕对齐自适应 WS 推送测试** (综合级联测试，下载 WAV 与 SRT)
+
+### 2. 纯 HTTP REST 降级接入示范 (兜底/降级方案)
+此类用例专门为【不支持 WebSocket 协议的轻量级开发环境】准备。代码中包含大量的商业级架构设计说明与注释，演示如何忽略 `track_mode: ws` 推荐并直接强行进行 HTTP `/status` 状态轮询。
+* `test/20260527/test_llm_local_poll.py` - **本地大模型 (Ollama) 纯 HTTP 轮询测试** (强行轮询 /status)
+* `test/20260527/test_hybrid_audio_poll.py` - **语音配音与字幕对齐纯 HTTP 轮询测试** (强行轮询并下载音频字幕)
+
+### 3. 其他核心测试用例
+* `test/20260527/test_comfyui_image.py` - ComfyUI 文生图采样进度 WS 推送（第一阶段：生成高清概念图）
+* `test/20260527/test_comfyui_video.py` - ComfyUI 图生视频采样进度 WS 推送（第二阶段：OS级跨目录文件拷贝并生成视频）
+* `test/20260527/test_llm_cloud.py` - 云端 API 并发/流式/轮询 2x2 忙闲矩阵自适应测试（SSE 流式首字延迟展示）
+* `test/20260527/test_providers_refactor.py` - 架构提供商层与执行器动态代理的 6 大模块单元测试
+
+测试产物统一分类归档并输出到 `test/20260527/outputs/` 的对应子目录下。
 
 ## 运行
 

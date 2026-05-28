@@ -1,13 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-KamlPro 配音与字幕 (TTS & Subtitle) 整合调度集成测试用例
-======================================================
-参考 test_hybrid_stream.py 风格，使用 httpx 与 asyncio 实现高精度并发/轮询日志打印。
-
-测试流程：
-1. 提交并轮询 TTS 任务（语音合成）直到成功，下载合成的语音 WAV 和字幕 SRT 产物。
-2. 提交并轮询 Subtitle 任务（音频-文本字幕强制对齐）直到成功，下载对齐的字幕 SRT 产物。
-3. 产物将分类下载并归入 test/20260527/outputs/ 目录中对应的子目录里。
+KamlPro 配音与字幕 (TTS & Subtitle) HTTP 轮询集成测试用例 (纯 HTTP 降级与兜底方案)
+=============================================================================
+本示例专门为【不支持 WebSocket 长连接的轻量级客户端环境（如无 WS 模块的微服务、简单后台脚本、第三方 REST 插件）】提供。
+虽然网关对于本类型任务默认推荐/返回的 `track_mode` 可能是 `ws`，但由于客户端技术栈限制，客户端完全可以
+【忽略该 track_mode 推荐，直接强行采用本文件所演示的纯 HTTP 轮询 `/status` 接口】来安全获取产物，网关底层会进行无缝兼容。
 """
 
 import asyncio
@@ -76,9 +73,9 @@ async def poll_task_status(task_id: str, prefix: str = "[轮询]") -> dict:
 
 
 async def run_tts_scenario():
-    """TTS 语音合成场景测试并下载文件"""
+    """TTS 语音合成场景测试并下载文件 (纯 HTTP 轮询)"""
     log_info("\n" + "=" * 60, "bold green")
-    log_info("场景 1: 提交 TTS 语音合成任务、轮询状态并下载音频与字幕文件", "bold green")
+    log_info("场景 1: 提交 TTS 并使用 HTTP 轮询 (忽略 track_mode 推荐) 下载音频与字幕", "bold green")
     log_info("=" * 60, "bold green")
 
     # 创建输出目录
@@ -106,7 +103,9 @@ async def run_tts_scenario():
             return
 
         task_id = data.get("data", {}).get("task_id")
-        log_info(f"[TTS] 任务提交成功！分配 task_id: {task_id}", "bold green")
+        track_mode = data.get("data", {}).get("track_mode", "poll")
+        log_info(f"[TTS] 任务提交成功！分配 task_id: {task_id} | 推荐 track_mode: {track_mode}", "bold green")
+        log_info(f"[TTS] [纯HTTP设计] 忽略推荐的 '{track_mode}' 模式，直接强行开启 HTTP /status 轮询...", "cyan")
 
         # 轮询状态
         result = await poll_task_status(task_id, prefix="[TTS 轮询]")
@@ -154,9 +153,9 @@ async def run_tts_scenario():
 
 
 async def run_subtitle_scenario():
-    """Subtitle 强制字幕时间戳对齐场景测试并下载文件"""
+    """Subtitle 对齐场景测试并下载文件 (纯 HTTP 轮询)"""
     log_info("\n" + "=" * 60, "bold green")
-    log_info("场景 2: 上传本地 WAV 并提交 Subtitle 对齐任务，轮询并下载字幕文件", "bold green")
+    log_info("场景 2: 上传 WAV 并提交 Subtitle 对齐 (忽略 track_mode 推荐) 下载字幕文件", "bold green")
     log_info("=" * 60, "bold green")
 
     # 创建输出目录
@@ -193,7 +192,9 @@ async def run_subtitle_scenario():
             return
 
         task_id = resp_data.get("data", {}).get("task_id")
-        log_info(f"[Subtitle] 任务提交成功！分配 task_id: {task_id}", "bold green")
+        track_mode = resp_data.get("data", {}).get("track_mode", "poll")
+        log_info(f"[Subtitle] 任务提交成功！分配 task_id: {task_id} | 推荐 track_mode: {track_mode}", "bold green")
+        log_info(f"[Subtitle] [纯HTTP设计] 忽略推荐的 '{track_mode}' 模式，直接强行开启 HTTP /status 轮询...", "cyan")
 
         # 轮询状态
         result = await poll_task_status(task_id, prefix="[Subtitle 轮询]")
@@ -225,7 +226,7 @@ async def run_subtitle_scenario():
 
 async def main():
     log_info("==========================================================", "bold yellow")
-    log_info("   Kalm 音频与字幕集成测试客户端 (基于协程 HTTPX)    ", "bold yellow")
+    log_info("   Kalm 音频与字幕 纯 HTTP 轮询集成测试客户端 (基于 REST)  ", "bold yellow")
     log_info("==========================================================", "bold yellow")
     log_info(f"   目标网关地址 : {BASE_URL}")
     log_info(f"   认证 Token   : Bearer 123456")

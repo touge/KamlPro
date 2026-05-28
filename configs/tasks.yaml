@@ -28,29 +28,29 @@ tasks:
   # --------------------------------------------------------------------------
   llm:
     service: "Ollama"             # 对应 services.yaml 中的 Ollama 服务定义
-    track_mode: poll              # 轮询模式：定期查询任务状态直到完成
+    track_mode: ws                # 统一使用 WebSocket 实时获取状态
     has_outputs: false            # 内容直接封装在结果里，无可下载文件
     executor:
       module: "src.core.executors.llm"
       function: "execute"
 
   # --------------------------------------------------------------------------
-  # LLM 对话任务（流式）
+  # LLM 对话任务（流式）ollama本地禁止streaming模式。
   # --------------------------------------------------------------------------
-  llm_streaming:
-    service: "Ollama"
-    track_mode: stream            # 流式模式：实时推送每个生成的 token
-    has_outputs: false            # 内容已经实时推送给客户端，无可下载文件
-    executor:
-      module: "src.core.executors.llm"
-      function: "execute_stream"
+  # llm_streaming:
+  #   service: "Ollama"
+  #   track_mode: stream            # 流式模式：实时推送每个生成的 token
+  #   has_outputs: false            # 内容已经实时推送给客户端，无可下载文件
+  #   executor:
+  #     module: "src.core.executors.llm"
+  #     function: "execute_stream"
 
   # --------------------------------------------------------------------------
   # TTS 语音合成任务
   # --------------------------------------------------------------------------
   tts:
     service: "TTS"                # 对应 services.yaml 中的 TTS 通用服务定义
-    track_mode: poll              # 轮询模式：等待合成完成后返回音频文件
+    track_mode: ws                # 统一使用 WebSocket 实时获取状态
     executor:
       module: "src.core.executors.tts"
       function: "execute"
@@ -60,7 +60,7 @@ tasks:
   # --------------------------------------------------------------------------
   subtitle:
     service: "TTS"                # 复用 TTS 服务（共享 Whisper 模型）
-    track_mode: poll
+    track_mode: ws                # 统一使用 WebSocket 实时获取状态
     executor:
       module: "src.core.executors.subtitle"
       function: "execute"
