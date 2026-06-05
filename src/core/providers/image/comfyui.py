@@ -32,6 +32,13 @@ class ComfyUIProvider(BaseImageProvider):
             log.error(f"[ComfyUI Provider] >>> task_id={task_id} 缺少 workflow 或 final_output_node_id")
             raise ValueError("Missing 'workflow' or 'final_output_node_id' in payload")
 
+        # 统一规范化: 支持单节点字符串 "9" 或多节点数组 ["264","266","296"]
+        if isinstance(final_output_node_id, (list, tuple)):
+            output_node_ids = [str(nid) for nid in final_output_node_id]
+        else:
+            output_node_ids = [str(final_output_node_id)]
+        log.info(f"[ComfyUI Provider] >>> task_id={task_id} 输出节点ID列表: {output_node_ids}")
+
         service_name = payload.get("_service_name", "ComfyUI")
         log.info(f"[ComfyUI Provider] >>> task_id={task_id} 获取服务地址, service_name={service_name}...")
         service_url = service_controller.get_service_url(service_name)
@@ -68,7 +75,7 @@ class ComfyUIProvider(BaseImageProvider):
         client = _ComfyUIClient(host, port)
 
         log.info(f"[ComfyUI Provider] >>> task_id={task_id} 开始提交 workflow 到 ComfyUI...")
-        final_outputs = client.run_workflow(workflow, client_id, progress_callback)
+        final_outputs = client.run_workflow(workflow, client_id, progress_callback, output_node_ids)
         log.info(f"[ComfyUI Provider] >>> task_id={task_id} workflow 执行完成")
         return final_outputs
 
@@ -82,7 +89,7 @@ class _ComfyUIClient:
         self.base_url = f"http://{server_address}:{port}"
         self.ws_url = f"ws://{server_address}:{port}/ws"
 
-    def run_workflow(self, workflow: dict, client_id: str, message_callback: callable) -> dict:
+    def run_workflow(self, workflow: dict, client_id: str, message_callback: callable, output_node_ids: list = None) -> dict:
         log.info(f"[ComfyUI Client] >>> _queue_prompt 开始...")
         prompt_id = self._queue_prompt(workflow, client_id)
         log.info(f"[ComfyUI Client] >>> _queue_prompt 完成, prompt_id={prompt_id}")
@@ -94,8 +101,24 @@ class _ComfyUIClient:
 
         log.info(f"[ComfyUI Client] >>> _get_history 开始, prompt_id={prompt_id}")
         history = self._get_history(prompt_id)
-        outputs = history.get(prompt_id, {}).get("outputs", {})
-        log.info(f"[ComfyUI Client] >>> _get_history 完成, outputs keys={list(outputs.keys())}")
+        all_outputs = history.get(prompt_id, {}).get("outputs", {})
+        log.info(f"[ComfyUI Client] >>> _get_history 完成, all_outputs keys={list(all_outputs.keys())}")
+
+        # 按指定节点 ID 过滤输出；未指定时返回全部
+        if output_node_ids:
+            outputs = {}
+            for nid in output_node_ids:
+                if nid in all_outputs:
+                    outputs[nid] = all_outputs[nid]
+                else:
+                    log.warning(f"[ComfyUI Client] >>> 指定输出节点 {nid} 不在 ComfyUI 返回的 outputs 中，可用节点: {list(all_outputs.keys())}")
+            if not outputs:
+                log.error(f"[ComfyUI Client] >>> 所有指定节点 {output_node_ids} 均未找到输出！回退返回全部 outputs")
+                outputs = all_outputs
+        else:
+            outputs = all_outputs
+
+        log.info(f"[ComfyUI Client] >>> 最终 outputs keys={list(outputs.keys())}")
         message_callback({"status": "completed", "prompt_id": prompt_id, "output_nodes": list(outputs.keys())})
         return outputs
 
@@ -130,14 +153,20 @@ class _ComfyUIClient:
                 last_msg_time = time.time()
                 data = json.loads(msg)
                 msg_type = data.get("type", "")
-                if msg_type in ("executing", "progress", "execution_start", "execution_cached"):
+                if msg_type in ("progress", "execution_start", "execution_cached"):
                     message_callback(data)
+                if msg_type == "executing":
+                    message_callback(data)
+                    # ComfyUI 全部节点执行完毕时发送 executing + node:null
+                    if data.get("data", {}).get("node") is None:
+                        log.info(f"[ComfyUI Client] >>> _track_progress 全部节点执行完毕, prompt_id={prompt_id}")
+                        break
+                if msg_type == "executed":
+                    log.info(f"[ComfyUI Client] >>> _track_progress 收到 executed, node={data.get('data', {}).get('node')}")
+                    # 不 break — 多输出工作流会有多个 executed，需等全部完成
                 if msg_type == "execution_error":
                     message_callback(data)
                     raise RuntimeError(f"ComfyUI execution error: {json.dumps(data.get('data', {}))}")
-                if msg_type == "executed" and data.get("data", {}).get("prompt_id") == prompt_id:
-                    log.info(f"[ComfyUI Client] >>> _track_progress 收到 executed, prompt_id={prompt_id}")
-                    break
         finally:
             ws.close()
             log.info(f"[ComfyUI Client] >>> _track_progress WS 已关闭, prompt_id={prompt_id}")

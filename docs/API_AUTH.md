@@ -121,26 +121,28 @@ async function apiCall(endpoint) {
 apiCall("http://127.0.0.1:7000/interface/status").then(console.log);
 ```
 
-### JavaScript (WebSocket)
+### JavaScript (浏览器 WebSocket)
 
-浏览器原生 WebSocket 不支持自定义 Header，但支持 `protocols` 参数。
-由于浏览器限制，**推荐在 URL 使用短生命周期 token**，或通过代理服务器中转。
+浏览器原生 WebSocket API 故意屏蔽了自定义 Header 的能力（如 `Authorization`）。为了避免将 Token 放在 URL 中暴露给服务器日志（Nginx/网关），我们全面采用了 **子协议 (Subprotocol) 伪装 Header 方案**。
+
+这是一种将 Token 隐藏在 `Sec-WebSocket-Protocol` 请求头中的安全最佳实践，浏览器会自动为您处理底层的 HTTP Header 拼接。
 
 ```javascript
-// 方案1：使用 x-token 协议头（部分浏览器/服务器支持）
 const TOKEN = "your-secret-token-1";
-const ws = new WebSocket("ws://127.0.0.1:7000/interface/ws", {
-  protocols: TOKEN
-});
+const url = "ws://127.0.0.1:7000/interface/queue/ws";
 
-// 方案2（推荐）：通过 HTTP API 获取一次性短 token，再用 query 参数连接
-// 先通过 fetch 获取短 token
-const resp = await fetch("/interface/ws-token", {
-  headers: { "Authorization": `Bearer ${TOKEN}` }
-});
-const { shortToken } = await resp.json();
-// 再用短 token 连接 WebSocket
-const ws = new WebSocket(`ws://127.0.0.1:7000/interface/ws?token=${shortToken}`);
+// 强烈推荐：将 'kalm-auth' 作为第一个协议，Token 作为第二个协议传入
+const ws = new WebSocket(url, ['kalm-auth', TOKEN]);
+
+ws.onopen = () => {
+    console.log("WebSocket 连接且鉴权成功！");
+};
+
+ws.onclose = (event) => {
+    if (event.code === 4001) {
+        console.error("鉴权失败：Token 无效");
+    }
+};
 ```
 
 ### Node.js (ws 库)
@@ -234,9 +236,9 @@ asyncio.run(main())
 2. 确认 Header 格式为 `Authorization: Bearer <token>`
 
 ### Q: 浏览器 WebSocket 怎么传 Header？
-浏览器原生 `new WebSocket()` 不支持自定义 Header。解决方案：
-- 使用 Node.js / Python 等服务端 ws 客户端（支持自定义 Header）
-- 通过 HTTP API 先获取短生命周期 token，再用 query 参数连接
+浏览器原生 `new WebSocket()` 不支持自定义 Header（如 `Authorization`）。解决方案：
+- **纯前端项目（推荐）**：使用子协议数组 `new WebSocket(url, ['kalm-auth', token])`。后端会自动拦截并解析。
+- **服务端 Node.js / Python**：直接在建连时传入 `Authorization: Bearer <token>` 即可。
 
 ### Q: 多个客户端用不同 Token 可以吗？
 可以，`tokens` 列表中的任何一个都能通过验证。

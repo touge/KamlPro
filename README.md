@@ -6,6 +6,21 @@ AI 智能网关平台。前端 ↔ KamlPro ↔ 后端服务（ComfyUI / TTS / �
 
 ## 快速开始
 
+### 方式一：使用启动脚本（推荐）
+
+```powershell
+# 双击运行，或使用 launcher.bat（推荐 Windows 用户）
+launcher.bat
+
+# 支持命令行参数
+launcher.bat --port 8080 --host 0.0.0.0
+launcher.bat --install-deps   # 自动安装依赖
+```
+
+`launcher.bat` 会自动检测 Python 环境（conda / 虚拟环境 / 系统 Python），检查并安装依赖，然后启动服务。
+
+### 方式二：手动启动
+
 ```powershell
 pip install -r requirements.txt
 python main.py
@@ -232,6 +247,29 @@ audio_file: <音频文件>
 
 产物下载：`GET /file/tts/static/{backend_task_id}/subtitle.srt`
 
+### TTS 发音人列表
+
+获取 TTS 后端支持的所有发音人（自动代理到后端服务，透传认证 token）：
+
+```http
+GET /interface/tts/speakers
+```
+
+返回：
+```json
+{
+  "code": 200,
+  "data": {
+    "categories": [
+      {
+        "name": "中文男声",
+        "speakers": ["speaker_001", "speaker_002"]
+      }
+    ]
+  }
+}
+```
+
 ### 文件访问
 
 ```http
@@ -253,13 +291,28 @@ GET /file/{service_name}/{file_path}
 
 ### LLM 测试矩阵
 
-| 用例 | 模型 | 追踪方式 | 说明 |
-|------|------|---------|------|
-| `test_llm_local_ws.py` | Ollama (gemma3:12b) | WS 自适应 | 本地大模型，根据 track_mode 智能选择 WS 或 poll |
-| `test_llm_local_poll.py` | Ollama (gemma3:12b) | HTTP 轮询 | 本地大模型，纯 HTTP 降级方案 |
-| `test_llm_cloud_ws.py` | DeepSeek (v4-flash) | WS 自适应 | 云端大模型，根据 track_mode 智能选择 WS 或 poll |
-| `test_llm_cloud_poll.py` | DeepSeek (v4-flash) | HTTP 轮询 | 云端大模型，纯 HTTP 降级方案 |
-| `test_llm_cloud_stream.py` | DeepSeek (v4-flash) | SSE 流式 | 云端大模型，流式逐 Token 推送 + TTFT 测量 |
+#### WebSocket 自适应接入（最佳实践）
+根据任务提交返回的 `track_mode` 智能路由到 WebSocket，支持配置变更时自动降级。
+
+| 用例 | 模型 | 说明 |
+|------|------|------|
+| `test_llm_local_ws.py` | Ollama (gemma3:12b) | 本地大模型自适应 WS |
+| `test_llm_cloud_ws.py` | DeepSeek (v4-flash) | 云端大模型自适应 WS |
+
+#### 纯 HTTP REST 降级（兜底方案）
+强行忽略 `track_mode: ws` 推荐，直接通过 HTTP `/status` 轮询获取结果。
+
+| 用例 | 模型 | 说明 |
+|------|------|------|
+| `test_llm_local_poll.py` | Ollama (gemma3:12b) | 本地大模型纯 HTTP 轮询 |
+| `test_llm_cloud_poll.py` | DeepSeek (v4-flash) | 云端大模型纯 HTTP 轮询 |
+
+#### 云端流式输出（仅云端 API）
+SSE 流式逐 Token 推送，支持闲时直连/忙时排队 + TTFT（首字延迟）测量。
+
+| 用例 | 模型 | 说明 |
+|------|------|------|
+| `test_llm_cloud_stream.py` | DeepSeek (v4-flash) | SSE 流式 + TTFT 展示 |
 
 ### 其他测试
 
@@ -314,6 +367,7 @@ src/
 │       ├── queue_ws.py      # 队列广播 WebSocket
 │       ├── stream_proxy.py  # HTTP 流式透传 (NDJSON)
 │       ├── llm.py           # LLM 端点 (模型列表/普通生成)
+│       ├── speaker.py       # TTS 发音人列表代理
 │       ├── file_proxy.py    # 通用文件代理
 │       └── system.py        # 健康检查
 ├── core/
@@ -322,9 +376,11 @@ src/
 │   ├── ws_manager.py        # WS 连接管理 (per-task + 队列广播)
 │   ├── service_controller.py # 后端服务生命周期管理
 │   ├── response.py          # API 响应辅助
-│   ├── security.py          # Token 认证
+│   ├── security.py          # Token 认证（支持浏览器 WebSocket subprotocol）
+│   ├── providers/
+│   │   └── image/
+│   │       └── comfyui.py   # ComfyUI 图像生成（支持多输出节点）
 │   └── executors/
-│       ├── image.py         # ComfyUI 图像生成
 │       ├── llm.py           # LLM 生成 (普通 + 流式)
 │       ├── tts.py           # TTS 语音生成（支持 generate_subtitle）
 │       └── subtitle.py      # 字幕生成（文件上传）
@@ -333,3 +389,13 @@ src/
     ├── yaml_config_loader.py # YAML 配置加载
     └── task_cleanup.py      # 定期清理过期任务
 ```
+
+## 最近更新
+
+### v20260605
+- **ComfyUI 多输出节点支持**: `final_output_node_id` 支持单节点字符串 `"9"` 或多节点数组 `["264","266","296"]`，自动过滤输出
+- **WebSocket 浏览器认证**: 支持通过 `Sec-WebSocket-Protocol` 头传递 token（格式: `['kalm-auth', 'token']`），解决浏览器 WebSocket 认证 subprotocol 报错问题
+- **TTS 发音人代理端点**: 新增 `GET /interface/tts/speakers`，前端无需知道后端 TTS 地址
+- **llm_streaming 配置启用**: `configs/tasks.yaml` 中启用云端流式任务配置，`service: "cloud"` 占位防止本地误调用
+- **启动脚本升级**: `launcher.bat` 替代 `run.bat`，自动检测 conda/虚拟环境/系统 Python，支持 `--install-deps` 参数
+- **ComfyUI WS 消息处理优化**: 分离 `executing` 和 `progress` 消息处理，支持多输出工作流正确检测执行完成

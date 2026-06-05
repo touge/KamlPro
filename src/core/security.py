@@ -80,18 +80,26 @@ class WebSocketAuthMiddleware:
             return
 
         ws = WebSocket(scope, receive=receive, send=send)
-        if not self._verify_ws_token(ws):
+        is_valid, auth_subprotocol = self._verify_ws_token(ws)
+        if not is_valid:
             await ws.accept()
             await ws.close(code=4001, reason="Missing or invalid authentication token")
             return
 
-        await self.app(scope, receive, send)
+        # 拦截 send 消息，自动在握手时回传 subprotocol，防止浏览器报错
+        async def custom_send(message):
+            if message["type"] == "websocket.accept" and auth_subprotocol:
+                if "subprotocol" not in message or message.get("subprotocol") is None:
+                    message["subprotocol"] = auth_subprotocol
+            await send(message)
 
-    def _verify_ws_token(self, ws) -> bool:
+        await self.app(scope, receive, custom_send)
+
+    def _verify_ws_token(self, ws) -> tuple[bool, str | None]:
         tokens = yaml_config_loader.get("api_server.tokens", [])
         # log.info(f"[WSAuth] Configured tokens: {tokens}")
         if not tokens:
-            return True
+            return True, None
 
         auth_header = ws.headers.get("authorization", "")
         x_token = ws.headers.get("x-token", "")
@@ -101,11 +109,22 @@ class WebSocketAuthMiddleware:
         if auth_header.startswith("Bearer "):
             token = auth_header[7:]
             if token in tokens:
-                return True
+                return True, None
 
         # 方式2: 从 x-token 头获取（简化版，直接传 token 值）
         if x_token and x_token in tokens:
-            return True
+            return True, None
+
+        # 方式3: 从 Sec-WebSocket-Protocol 头获取（兼容浏览器前端）
+        # 浏览器传的 subprotocol 数组：['kalm-auth', 'token']
+        # 会被拼接成请求头: Sec-WebSocket-Protocol: kalm-auth, token
+        subprotocols_str = ws.headers.get("sec-websocket-protocol", "")
+        if subprotocols_str:
+            parts = [p.strip() for p in subprotocols_str.split(",")]
+            if len(parts) >= 2 and parts[0] == "kalm-auth":
+                token = parts[1]
+                if token in tokens:
+                    return True, "kalm-auth"
 
         log.info("[WSAuth] Token verification failed, closing with code 4001")
-        return False
+        return False, None
