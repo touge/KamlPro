@@ -85,7 +85,7 @@ openai_compatible.py  <- OpenAICompatibleProvider (@register_provider("openai_co
 
 | 后端 | 后端原生协议 | 网关推荐前端协议 (YAML配置) | 真实底层实现 |
 |---|---|---|---|
-| ComfyUI | HTTP POST + WS 进度 | **WebSocket (ws)** | `image.py` + 原生 WS 进度透传 |
+| ComfyUI | HTTP POST + WS 进度 | **WebSocket (ws)** | `image.py` + 原生透传 + `overall_progress` 智能平滑拦截 |
 | Ollama 本地非流式 | HTTP 一次性 POST | **WebSocket (ws)** | `llm.py` + 网关后台代理轮询兜底推送 |
 | TTS 语音合成 | HTTP 轮询 | **WebSocket (ws)** | `tts.py` + 网关后台代理轮询兜底推送 |
 | 字幕强制对齐 | multipart POST + HTTP 轮询 | **WebSocket (ws)** | `subtitle.py` + 网关后台代理轮询兜底推送 |
@@ -94,6 +94,8 @@ openai_compatible.py  <- OpenAICompatibleProvider (@register_provider("openai_co
 | 文件访问代理 | HTTP GET | HTTP GET | `file_proxy.py` (资源读取通道) |
 
 > **⚠️ 本地 Ollama 只能使用非流式接口**，并且在网关 `tasks.yaml` 中其 `track_mode` 统一声明为 `ws`，由网关在后台代劳轮询并推送。若前端环境仅具备 HTTP REST 能力，允许忽略推荐并直接强行调 `/status` 接口轮询（网关全向向下兼容）。
+
+> **💡 ComfyUI 进度条智能平滑**：为彻底解决复杂工作流（多采样器、内部切片循环）造成的进度条反复横跳问题，KamlPro 引入了纯增量的进度拦截器。通过高水位锁下发单调递增的 `overall_progress` 事件，下游前端应优先绑定此事件。同时拦截器也原封不动透传了所有底层原生数据，实现了 100% 零侵害的后向兼容。
 
 ## 代码约定
 

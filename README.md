@@ -116,7 +116,7 @@ setInterval(() => { queueWs.send("ping"); }, 30000);
 const taskWs = new WebSocket(`ws://localhost:7000/interface/tasks/${taskId}/ws`);
 taskWs.onmessage = (e) => {
   const msg = JSON.parse(e.data);
-  // ComfyUI: 透传原生 ws 协议 {type: "executing", ...}
+  // ComfyUI: 透传原生 ws 协议并下发平滑进度 {type: "overall_progress", data: {percent: 65, message: "..."}}
   // TTS / 本地LLM: Kalm 后台 poll 轮询转发，伪装成 ws 推送 {status: "running", ...}
   // 云端API排队: 等待 {type: "task_running"} 信号后切换到 HTTP 流
 };
@@ -387,12 +387,15 @@ src/
 └── logic/
     ├── logger.py            # 日志
     ├── yaml_config_loader.py # YAML 配置加载
-    └── task_cleanup.py      # 定期清理过期任务
+    ├── task_cleanup.py      # 定期清理过期任务
+    ├── comfy_progress_interceptor.py # ComfyUI 智能进度拦截器（单调递增平滑进度条）
+    └── platform_log_filter.py # 平台日志过滤
 ```
 
 ## 最近更新
 
 ### v20260605
+- **ComfyUI 智能全局进度条**: 拦截并平滑化 ComfyUI 底层反复横跳的 WebSocket 进度，提供严格单调递增的 `overall_progress` 推送，实现 100% 零侵害后向兼容的完美商业级体验
 - **ComfyUI 多输出节点支持**: `final_output_node_id` 支持单节点字符串 `"9"` 或多节点数组 `["264","266","296"]`，自动过滤输出
 - **WebSocket 浏览器认证**: 支持通过 `Sec-WebSocket-Protocol` 头传递 token（格式: `['kalm-auth', 'token']`），解决浏览器 WebSocket 认证 subprotocol 报错问题
 - **TTS 发音人代理端点**: 新增 `GET /interface/tts/speakers`，前端无需知道后端 TTS 地址

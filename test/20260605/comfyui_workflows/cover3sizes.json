@@ -1,0 +1,454 @@
+{
+  "264": {
+    "inputs": {
+      "images": [
+        "318",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "预览图像"
+    }
+  },
+  "266": {
+    "inputs": {
+      "images": [
+        "315",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "预览图像"
+    }
+  },
+  "277": {
+    "inputs": {
+      "width": 1920,
+      "height": 1088,
+      "batch_size": 1
+    },
+    "class_type": "EmptySD3LatentImage",
+    "_meta": {
+      "title": "空Latent图像（SD3）"
+    }
+  },
+  "288": {
+    "inputs": {
+      "width": 1088,
+      "height": 1440,
+      "batch_size": 1
+    },
+    "class_type": "EmptySD3LatentImage",
+    "_meta": {
+      "title": "空Latent图像（SD3）"
+    }
+  },
+  "289": {
+    "inputs": {
+      "width": 1920,
+      "height": 1440,
+      "batch_size": 1
+    },
+    "class_type": "EmptySD3LatentImage",
+    "_meta": {
+      "title": "空Latent图像（SD3）"
+    }
+  },
+  "296": {
+    "inputs": {
+      "images": [
+        "316",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "预览图像"
+    }
+  },
+  "313": {
+    "inputs": {
+      "value": "你的爱情故事\n宇宙大爆炸时就写好了"
+    },
+    "class_type": "PrimitiveStringMultiline",
+    "_meta": {
+      "title": "字符串（多行）"
+    }
+  },
+  "315": {
+    "inputs": {
+      "text": [
+        "313",
+        0
+      ],
+      "x": 100,
+      "y": 250,
+      "font_size": 180,
+      "line_spacing": 10,
+      "align": "left",
+      "horizontal_align": "left",
+      "vertical_align": "middle",
+      "text_color": "#ffffff",
+      "text_opacity": 1,
+      "stroke_width": 5,
+      "stroke_color": "#000000",
+      "stroke_opacity": 1,
+      "shadow_x": 0,
+      "shadow_y": 0,
+      "shadow_color": "#000000",
+      "shadow_opacity": 1,
+      "font_file": "港风繁体-方正粗宋繁体.ttf",
+      "text_bg_top": 460,
+      "text_bg_height": 500,
+      "text_bg_opacity": 0.35,
+      "text_bg_fade_top": 40,
+      "text_bg_fade_bottom": 40,
+      "cleanup_mode": "soft",
+      "image": [
+        "310:302",
+        0
+      ]
+    },
+    "class_type": "TextOnImage",
+    "_meta": {
+      "title": "🖼️Text On Image"
+    }
+  },
+  "316": {
+    "inputs": {
+      "text": [
+        "313",
+        0
+      ],
+      "x": 100,
+      "y": 350,
+      "font_size": 135,
+      "line_spacing": 10,
+      "align": "center",
+      "horizontal_align": "center",
+      "vertical_align": "middle",
+      "text_color": "#ffffff",
+      "text_opacity": 1,
+      "stroke_width": 5,
+      "stroke_color": "#000000",
+      "stroke_opacity": 1,
+      "shadow_x": 0,
+      "shadow_y": 0,
+      "shadow_color": "#000000",
+      "shadow_opacity": 1,
+      "font_file": "港风繁体-方正粗宋繁体.ttf",
+      "text_bg_top": 790,
+      "text_bg_height": 400,
+      "text_bg_opacity": 0.35,
+      "text_bg_fade_top": 40,
+      "text_bg_fade_bottom": 40,
+      "cleanup_mode": "soft",
+      "image": [
+        "310:307",
+        0
+      ]
+    },
+    "class_type": "TextOnImage",
+    "_meta": {
+      "title": "🖼️Text On Image"
+    }
+  },
+  "318": {
+    "inputs": {
+      "text": [
+        "313",
+        0
+      ],
+      "x": 100,
+      "y": 350,
+      "font_size": 185,
+      "line_spacing": 10,
+      "align": "left",
+      "horizontal_align": "left",
+      "vertical_align": "middle",
+      "text_color": "#ffffff",
+      "text_opacity": 1,
+      "stroke_width": 5,
+      "stroke_color": "#000000",
+      "stroke_opacity": 1,
+      "shadow_x": 0,
+      "shadow_y": 0,
+      "shadow_color": "#000000",
+      "shadow_opacity": 1,
+      "font_file": "港风繁体-方正粗宋繁体.ttf",
+      "text_bg_top": 750,
+      "text_bg_height": 500,
+      "text_bg_opacity": 0.35,
+      "text_bg_fade_top": 40,
+      "text_bg_fade_bottom": 40,
+      "cleanup_mode": "soft",
+      "image": [
+        "310:298",
+        0
+      ]
+    },
+    "class_type": "TextOnImage",
+    "_meta": {
+      "title": "🖼️Text On Image"
+    }
+  },
+  "310:270": {
+    "inputs": {
+      "clip_name": "qwen\\qwen_2.5_vl_7b_fp8_scaled.safetensors",
+      "type": "qwen_image",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "加载CLIP"
+    }
+  },
+  "310:271": {
+    "inputs": {
+      "vae_name": "qwen\\qwen_image_vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "加载VAE"
+    }
+  },
+  "310:273": {
+    "inputs": {
+      "unet_name": "qwen\\qwen_image_2512_fp8_e4m3fn.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "UNet加载器"
+    }
+  },
+  "310:298": {
+    "inputs": {
+      "samples": [
+        "310:309",
+        0
+      ],
+      "vae": [
+        "310:271",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "310:299": {
+    "inputs": {
+      "shift": 3.1000000000000005,
+      "model": [
+        "310:306",
+        0
+      ]
+    },
+    "class_type": "ModelSamplingAuraFlow",
+    "_meta": {
+      "title": "采样算法（AuraFlow）"
+    }
+  },
+  "310:300": {
+    "inputs": {
+      "text": "宏大的宇宙大爆炸瞬间，炽热的星云爆发，中心隐约浮现一颗抽象的人心形状，周围环绕着代表命运锁链的金色光带，深紫色与亮橙色对比色调，史诗感构图，电影级光效，象征宿命与爱情的交织",
+      "clip": [
+        "310:270",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Positive Prompt)"
+    }
+  },
+  "310:301": {
+    "inputs": {
+      "text": "低分辨率，低画质，肢体畸形，手指畸形，画面过饱和，蜡像感，人脸无细节，过度光滑，画面具有AI感。构图混乱。文字模糊，扭曲",
+      "clip": [
+        "310:270",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Negative Prompt)"
+    }
+  },
+  "310:302": {
+    "inputs": {
+      "samples": [
+        "310:303",
+        0
+      ],
+      "vae": [
+        "310:271",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "310:303": {
+    "inputs": {
+      "seed": 410328329486768,
+      "steps": [
+        "310:304",
+        0
+      ],
+      "cfg": [
+        "310:305",
+        0
+      ],
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+        "310:299",
+        0
+      ],
+      "positive": [
+        "310:300",
+        0
+      ],
+      "negative": [
+        "310:301",
+        0
+      ],
+      "latent_image": [
+        "277",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "K采样器"
+    }
+  },
+  "310:304": {
+    "inputs": {
+      "value": 4
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "Int (Steps)"
+    }
+  },
+  "310:305": {
+    "inputs": {
+      "value": 1
+    },
+    "class_type": "PrimitiveFloat",
+    "_meta": {
+      "title": "Float (CFG)"
+    }
+  },
+  "310:306": {
+    "inputs": {
+      "lora_name": "qwen\\Qwen-Image-2512-Lightning-4steps-V1.0-fp32.safetensors",
+      "strength_model": 1,
+      "model": [
+        "310:273",
+        0
+      ]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": {
+      "title": "LoRA加载器（仅模型）"
+    }
+  },
+  "310:307": {
+    "inputs": {
+      "samples": [
+        "310:308",
+        0
+      ],
+      "vae": [
+        "310:271",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码"
+    }
+  },
+  "310:308": {
+    "inputs": {
+      "seed": 410328329486768,
+      "steps": [
+        "310:304",
+        0
+      ],
+      "cfg": [
+        "310:305",
+        0
+      ],
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+        "310:299",
+        0
+      ],
+      "positive": [
+        "310:300",
+        0
+      ],
+      "negative": [
+        "310:301",
+        0
+      ],
+      "latent_image": [
+        "288",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "K采样器"
+    }
+  },
+  "310:309": {
+    "inputs": {
+      "seed": 410328329486768,
+      "steps": [
+        "310:304",
+        0
+      ],
+      "cfg": [
+        "310:305",
+        0
+      ],
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+        "310:299",
+        0
+      ],
+      "positive": [
+        "310:300",
+        0
+      ],
+      "negative": [
+        "310:301",
+        0
+      ],
+      "latent_image": [
+        "289",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "K采样器"
+    }
+  }
+}

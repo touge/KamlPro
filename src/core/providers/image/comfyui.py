@@ -16,6 +16,7 @@ from typing import Dict, Any
 from src.core.service_controller import service_controller
 from src.logic.logger import log
 from src.logic.yaml_config_loader import yaml_config_loader
+from src.logic.comfy_progress_interceptor import ComfyProgressInterceptor
 from src.utils import translate_workflow_paths
 from src.core.providers.image.base import BaseImageProvider, register_image_provider
 
@@ -95,9 +96,21 @@ class _ComfyUIClient:
         log.info(f"[ComfyUI Client] >>> _queue_prompt 完成, prompt_id={prompt_id}")
         message_callback({"status": "queued", "prompt_id": prompt_id})
 
-        log.info(f"[ComfyUI Client] >>> _track_progress 开始, prompt_id={prompt_id}")
-        self._track_progress(prompt_id, client_id, message_callback)
+        total_nodes = len(workflow.keys()) if isinstance(workflow, dict) else 1
+        interceptor = ComfyProgressInterceptor(message_callback, total_nodes)
+
+        log.info(f"[ComfyUI Client] >>> _track_progress 开始, prompt_id={prompt_id}, total_nodes={total_nodes}")
+        self._track_progress(prompt_id, client_id, interceptor)
         log.info(f"[ComfyUI Client] >>> _track_progress 完成, prompt_id={prompt_id}")
+        
+        # 兜底收尾：全部执行完成，发送最终的 100%
+        message_callback({
+            "type": "overall_progress",
+            "data": {
+                "percent": 100,
+                "message": "执行完成 (100%)"
+            }
+        })
 
         log.info(f"[ComfyUI Client] >>> _get_history 开始, prompt_id={prompt_id}")
         history = self._get_history(prompt_id)
