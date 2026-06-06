@@ -327,6 +327,20 @@ python test/20260527/test_hybrid_audio_poll.py
 
 产物输出到 `test/20260527/outputs/` 下对应子目录。
 
+### ComfyUI 封面生成测试 (`test/20260605/`)
+
+```powershell
+# 封面三尺寸批量生成测试（验证智能进度拦截器 + 多输出节点）
+python test/20260605/test_cover3sizes.py
+```
+
+验证要点：
+- **智能进度拦截器**：全局进度条严格单调递增（无回跳），底层节点进度被平滑聚合
+- **多输出节点**：工作流包含 3 个 SaveImage 节点 (`264, 266, 296`)，全部输出正确捕获
+- 详细分析见 `test/20260605/ComfyUI_Overall_Progress_Report.md`
+
+产物输出到 `test/20260605/outputs/` 下对应子目录。
+
 ## 配置
 
 - `config.yaml` — API 配置、任务映射、LLM 本地模型
@@ -377,19 +391,34 @@ src/
 │   ├── service_controller.py # 后端服务生命周期管理
 │   ├── response.py          # API 响应辅助
 │   ├── security.py          # Token 认证（支持浏览器 WebSocket subprotocol）
-│   ├── providers/
-│   │   └── image/
+│   ├── providers/           # Provider 模块化架构（按类型分类）
+│   │   ├── llm/             # LLM 提供商
+│   │   │   ├── base.py      # LLM 基类
+│   │   │   ├── manager.py   # LLM 提供商管理器
+│   │   │   ├── ollama.py    # Ollama 本地推理
+│   │   │   └── openai_compatible.py # OpenAI 兼容接口
+│   │   ├── audio/           # 音频提供商
+│   │   │   ├── base.py      # 音频基类
+│   │   │   ├── manager.py   # 音频提供商管理器
+│   │   │   └── index_tts.py # IndexTTS 语音合成
+│   │   └── image/           # 图像提供商
+│   │       ├── base.py      # 图像基类
+│   │       ├── manager.py   # 图像提供商管理器
 │   │       └── comfyui.py   # ComfyUI 图像生成（支持多输出节点）
 │   └── executors/
 │       ├── llm.py           # LLM 生成 (普通 + 流式)
 │       ├── tts.py           # TTS 语音生成（支持 generate_subtitle）
-│       └── subtitle.py      # 字幕生成（文件上传）
-└── logic/
-    ├── logger.py            # 日志
-    ├── yaml_config_loader.py # YAML 配置加载
-    ├── task_cleanup.py      # 定期清理过期任务
-    ├── comfy_progress_interceptor.py # ComfyUI 智能进度拦截器（单调递增平滑进度条）
-    └── platform_log_filter.py # 平台日志过滤
+│       ├── subtitle.py      # 字幕生成（文件上传）
+│       └── image.py         # 图像生成
+├── logic/
+│   ├── logger.py            # 日志
+│   ├── yaml_config_loader.py # YAML 配置加载
+│   ├── task_cleanup.py      # 定期清理过期任务
+│   ├── comfy_progress_interceptor.py # ComfyUI 智能进度拦截器（单调递增平滑进度条）
+│   └── platform_log_filter.py # 平台日志过滤
+└── utils/
+    ├── json_helper.py       # JSON 工具函数
+    └── path_helper.py       # 路径翻译（支持非路径字段排除）
 ```
 
 ## 最近更新

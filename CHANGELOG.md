@@ -1,5 +1,41 @@
 # Changelog
 
+## [Unreleased] - 2026-06-05
+
+### 🎯 ComfyUI 智能进度拦截器
+
+解决 ComfyUI 多节点或内部切片循环导致的进度条"回跳"问题。
+
+- **新增 `src/logic/comfy_progress_interceptor.py`**: 使用高水位锁和"芝诺逼近法"合成严格单调递增的 `overall_progress`
+- **ComfyUI 多输出节点支持**: `final_output_node_id` 支持单节点字符串 `"9"` 或多节点数组 `["264","266","296"]`
+- **100% 后向兼容**: 原始 WebSocket 事件透传，新增 `overall_progress` 消息为零侵害叠加
+- **测试覆盖**: `test/20260605/test_cover3sizes.py` 验证三尺寸封面批量生成场景
+
+### 🔐 WebSocket 浏览器认证
+
+- 支持通过 `Sec-WebSocket-Protocol` 头传递 token（格式: `['kalm-auth', 'token']`）
+- 解决浏览器 WebSocket 无法自定义请求头导致的认证 subprotocol 报错问题
+
+### 🎙️ TTS 发音人代理端点
+
+- 新增 `GET /interface/tts/speakers` 接口
+- 前端无需直接访问 TTS 后端地址，由网关统一代理并透传认证 token
+
+### 🚀 启动脚本升级
+
+- `launcher.bat` 替代 `run.bat`
+- 自动检测 conda / 虚拟环境 / 系统 Python
+- 支持 `--install-deps` 参数自动安装依赖
+- 支持 `--port` 和 `--host` 命令行参数
+
+### ⚙️ 配置与路由优化
+
+- `llm_streaming` 任务类型在 `configs/tasks.yaml` 中启用
+- TTS 发音人路由 `src/api/routes/speaker.py` 新增
+- ComfyUI WS 消息处理优化：分离 `executing` 和 `progress` 消息
+
+---
+
 ## [Unreleased] - 2026-05-28
 
 ### 📡 统一前端自适应路由：`track_mode` 与测试规范大对齐
