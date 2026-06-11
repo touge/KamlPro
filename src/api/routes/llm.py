@@ -27,7 +27,7 @@ class GenerateRequest(BaseModel):
 
 @router.get("/llm/models")
 async def list_models():
-    llm_data = yaml_config_loader.get("llm_providers.llm", {})
+    llm_data = yaml_config_loader.get("llm_providers.providers", {})
     flat_models = []
     for provider_name, provider_config in llm_data.items():
         models_list = provider_config.get("models", [])
