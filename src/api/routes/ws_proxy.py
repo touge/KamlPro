@@ -80,6 +80,9 @@ async def task_websocket(websocket: WebSocket, task_id: str):
 
     try:
         await done_event.wait()
+        # 等待 100ms，确保 task_complete 帧已从 send buffer 刷入 TCP 栈，
+        # 再调用 ws.close()，防止帧在传输途中被连接关闭打断
+        await asyncio.sleep(0.1)
     except Exception:
         pass
     finally:

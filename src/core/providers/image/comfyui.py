@@ -132,7 +132,7 @@ class _ComfyUIClient:
             outputs = all_outputs
 
         log.info(f"[ComfyUI Client] >>> 最终 outputs keys={list(outputs.keys())}")
-        message_callback({"status": "completed", "prompt_id": prompt_id, "output_nodes": list(outputs.keys())})
+        message_callback({"type": "awaiting_delivery", "status": "completed", "prompt_id": prompt_id, "output_nodes": list(outputs.keys())})
         return outputs
 
     def _queue_prompt(self, prompt: dict, client_id: str) -> str:
