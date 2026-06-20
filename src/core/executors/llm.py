@@ -38,13 +38,19 @@ def execute(task_id: str, **payload):
     try:
         TaskManager.update_task(task_id, TaskManager.STATUS_RUNNING,
             {"message": "LLM processing..."})
+
+        if TaskManager.is_cancelled(task_id):
+            raise RuntimeError("任务已被用户手动停止")
             
         provider = llm_provider_manager.get_provider_for_model(model)
         result = provider.generate(model, prompt, options)
             
         TaskManager.update_task(task_id, TaskManager.STATUS_SUCCESS, result=result)
     except Exception as e:
-        log.error(f"[LLM Executor] Task {task_id} failed: {e}", exc_info=True)
+        if "任务已被用户手动停止" in str(e):
+            log.info(f"[LLM Executor] Task {task_id} was cancelled by user.")
+        else:
+            log.error(f"[LLM Executor] Task {task_id} failed: {e}", exc_info=True)
         TaskManager.update_task(task_id, TaskManager.STATUS_FAILED, {"message": str(e)})
 
 
@@ -66,7 +72,7 @@ def execute_stream(task_id: str, output_queue: queue.Queue, started_event: threa
         return
 
     try:
-        # 将 _service_name 传递给 options 便于 Provider 确定关联的本地物理服务
+        # 将 _service_name 传递给 options 便于 Provider 确定关联 of 本地物理服务
         if "_service_name" in payload:
             options["_service_name"] = payload["_service_name"]
 
@@ -74,7 +80,10 @@ def execute_stream(task_id: str, output_queue: queue.Queue, started_event: threa
         provider.generate_stream(task_id, model, prompt, options, output_queue, started_event)
             
     except Exception as e:
-        log.error(f"[LLM Stream] Task {task_id} failed: {e}", exc_info=True)
+        if "任务已被用户手动停止" in str(e):
+            log.info(f"[LLM Stream] Task {task_id} was cancelled by user.")
+        else:
+            log.error(f"[LLM Stream] Task {task_id} failed: {e}", exc_info=True)
         output_queue.put(json.dumps({"error": str(e)}))
         output_queue.put(None)
         TaskManager.update_task(task_id, TaskManager.STATUS_FAILED, {"message": str(e)})

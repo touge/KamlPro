@@ -66,6 +66,9 @@ class OllamaProvider(BaseLLMProvider):
         if not base_url:
             raise RuntimeError(f"Ollama service '{service_name}' not available")
 
+        if TaskManager.is_cancelled(task_id):
+            raise RuntimeError("任务已被用户手动停止")
+
         api_url = f"{base_url.rstrip('/')}/api/generate"
         req_data = {
             "model": model,
@@ -84,6 +87,10 @@ class OllamaProvider(BaseLLMProvider):
         resp.raise_for_status()
 
         for raw_line in resp.iter_lines():
+            if TaskManager.is_cancelled(task_id):
+                log.info(f"[Ollama Stream] Task {task_id} was cancelled. Closing connection.")
+                resp.close()
+                raise RuntimeError("任务已被用户手动停止")
             if raw_line:
                 decoded_line = raw_line.decode('utf-8') if isinstance(raw_line, bytes) else raw_line
                 output_queue.put(decoded_line)

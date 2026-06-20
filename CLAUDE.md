@@ -11,6 +11,7 @@ Kalm 是纯 AI 任务中转控制站。前端 ↔ Kalm ↔ 后端服务（ComfyU
 ```
 POST /interface/tasks/submit      → scheduler (FIFO 队列) → executor → 后端服务
 GET  /interface/tasks/{id}/status → TaskManager (内存状态)
+POST /interface/tasks/{id}/cancel → TaskManager (标记取消) & 各后端物理中断
 WS   /interface/tasks/{id}/ws     → ws_manager (实时推送，ComfyUI 原生 WS 协议)
 WS   /interface/queue/ws          → ws_manager 队列广播 (任务生命周期通知)
 POST /interface/llm/generate-stream → 排队 → StreamingResponse (NDJSON 透传)
@@ -20,9 +21,9 @@ GET  /file/{service}/{path}      → httpx → 后端 → 流式返回前端
 - 调度器：`src/core/scheduler.py`，单例单线程，`queue.Queue` + 服务生命周期。支持普通任务和流式任务（带 `output_queue`/`started_event`）。支持智能资源释放（详见下方"资源释放策略"）。
 - 执行器：`src/core/executors/*.py`，每个只做 提交→透传。普通执行器签名 `def execute(task_id, **payload)`，流式执行器签名 `def execute_stream(task_id, output_queue, **payload)`。
 - 文件代理：`src/api/routes/file_proxy.py`，通用端点。`service_name` 可以是 `task_type`（如 `comfyui`），通过 `config.yaml` 的 `tasks.{task_type}.service` 映射到实际服务名（如 `ComfyUI_Windows`）。使用 requests 库同步拉取 + ThreadPoolExecutor。
+- 任务状态与取消：`src/core/task_manager.py`，内存字典 + threading.Lock + TTL 自动清理。提供 `is_cancelled` 和 `cancel` 功能。
 - 任务提交支持 JSON 和 multipart/form-data 两种 Content-Type（字幕任务需文件上传）。
 - 服务管理：`src/core/service_controller.py`，引用计数 + 子进程启停。`_find_service_key` 大小写不敏感，精确匹配失败后模糊匹配兜底（`ComfyUI` → `ComfyUI_Windows`）。支持 `auto_start` 常驻模式（Kalm 启动时自动拉起，常驻不回收）和启动时端口强杀。
-- 任务状态：`src/core/task_manager.py`，内存字典 + threading.Lock + TTL 自动清理。
 - WS 管理：`src/core/ws_manager.py`，桥接同步执行器线程 → 异步 WS 推送（`run_coroutine_threadsafe`）。支持 per-task 推送和全局队列广播（`broadcast_queue()`）。
 - WS 端点：`src/api/routes/ws_proxy.py`，前端连 `/tasks/{id}/ws` 获取实时进度。内部有兜底轮询（`poll_fallback`，每 2 秒检查 TaskManager），不依赖特定后端协议的 WS 也能检测完成。
 - 队列广播端点：`src/api/routes/queue_ws.py`，前端连 `/queue/ws` 接收任务生命周期通知（`task_enqueued` / `task_started` / `task_completed`）。所有连接客户端收到相同广播，按 `task_id` 自行过滤。
@@ -186,6 +187,25 @@ openai_compatible.py  <- OpenAICompatibleProvider (@register_provider("openai_co
 * `test/20260527/test_providers_refactor.py` - 架构提供商层与执行器动态代理的 6 大模块单元测试
 
 测试产物统一分类归档并输出到 `test/20260527/outputs/` 的对应子目录下。
+
+### 5. 任务取消与物理中断测试 (20260620 版本)
+包含在生成过程中进行手动取消、状态轮询以及自动下载生成物的核心逻辑：
+- `test/20260620/test_comfyui_single.py` - **ComfyUI 单任务生成与状态轮询/取消测试**（自动输出至 `test/20260620/outputs/`）
+- `test/20260620/test_comfyui_multiple.py` - **ComfyUI 多任务批量生成与排队取消测试**
+- `test/20260620/test_tts_single.py` - **TTS 单任务配音生成与取消测试**
+- `test/20260620/test_tts_multiple.py` - **TTS 多任务并发与排队取消测试**
+
+## 任务停止与双重物理中断机制
+
+为了防止 GPU 计算资源和云端大模型 API 计费的浪费，KamlPro 实现了**全链路任务停止与双重物理中断机制**：
+
+- **任务取消端点**：`POST /interface/tasks/{id}/cancel`。接收到取消请求后，立即在 `TaskManager` 中标记取消状态并生成取消事件。
+- **ComfyUI 双重物理中断**：
+  1. **网关异步主动切断**：在 `cancel` 路由收到请求时，立即向 ComfyUI 后端发送 `/queue` 任务删除和 `/interrupt` 中断请求，防止由于 Websocket 阻塞导致取消延迟。
+  2. **执行线程被动检测**：在 ComfyUI 轮询/WS 接收循环中，每次循环开始或收到数据时检测 `TaskManager.is_cancelled(task_id)`。一旦触发，立即发起 `/queue` 与 `/interrupt` 物理中断，并抛出 `RuntimeError("任务已被用户手动停止")` 中断当前执行流程。
+- **大模型 (LLM) 物理中断**：流式或非流式大模型在检测到任务取消后，立即主动关闭 HTTP 响应流连接 (`resp.close()`)，停止后端模型计算与计费。
+- **语音合成 (TTS) 物理中断**：轮询检测状态时实时检查取消状态，一旦取消，退出轮询，拒绝拉取或处理生成的音频/字幕产物。
+- **日志净化**：在各执行器捕获 `RuntimeError("任务已被用户手动停止")` 异常时，屏蔽大段 Traceback，仅打印清晰的用户取消 Info 日志，确保控制台日志的干净整洁。
 
 ## 运行
 

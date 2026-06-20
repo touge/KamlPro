@@ -90,6 +90,8 @@ class OpenAICompatibleProvider(BaseLLMProvider):
 
             words = sim_text.split(" ")
             for i, word in enumerate(words):
+                if TaskManager.is_cancelled(task_id):
+                    raise RuntimeError("任务已被用户手动停止")
                 time.sleep(0.15)  # 模拟网络与生成延迟
                 token = word + " " if i < len(words) - 1 else word
                 simulated_line = json.dumps({"response": token, "done": False})
@@ -104,6 +106,9 @@ class OpenAICompatibleProvider(BaseLLMProvider):
 
         if not base_url:
             raise RuntimeError(f"Cloud provider '{self.name}' has no base_url configured")
+
+        if TaskManager.is_cancelled(task_id):
+            raise RuntimeError("任务已被用户手动停止")
 
         api_url = f"{base_url.rstrip('/')}/chat/completions"
         headers = {
@@ -129,6 +134,10 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         # 逐块解析 OpenAI Stream 格式 (SSE) 并将其转换为统一 of Ollama NDJSON 格式
         thinking = False
         for raw_line in resp.iter_lines():
+            if TaskManager.is_cancelled(task_id):
+                log.info(f"[LLM Stream] Task {task_id} was cancelled. Closing connection.")
+                resp.close()
+                raise RuntimeError("任务已被用户手动停止")
             if not raw_line:
                 continue
             line = raw_line.decode('utf-8') if isinstance(raw_line, bytes) else raw_line

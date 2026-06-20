@@ -190,6 +190,19 @@ class TaskScheduler:
         # 如果是闲时即时流，状态早已在 API 路由层被更新为 RUNNING。
         # 如果是忙时排队，当前任务仍为 QUEUED，线程被调度执行时代表“轮到它了”，我们需要将它变更为 RUNNING，并向 WS 广播“活来了！”
         task_info = TaskManager.get_task(task_id)
+        if task_info and task_info.get("status") == TaskManager.STATUS_FAILED:
+            log.info(f"[Scheduler] Cloud task {task_id} was cancelled before starting. Skipping.")
+            if output_queue is not None:
+                output_queue.put(None)
+            ws_manager.broadcast_queue({
+                "type": "task_completed",
+                "task_id": task_id,
+                "next_task_id": None,
+                "next_task_type": None,
+                "next_track_mode": None,
+            })
+            return
+
         if task_info and task_info.get("status") == TaskManager.STATUS_QUEUED:
             TaskManager.update_task(task_id, TaskManager.STATUS_RUNNING, {"message": "Cloud task out of queue, starting..."})
             # 向前端 WS 管道广播：任务正在执行（前端收到此消息即可瞬间触发 GET /stream 连接！）
@@ -212,6 +225,8 @@ class TaskScheduler:
         })
 
         try:
+            if TaskManager.get_task(task_id).get("status") == TaskManager.STATUS_FAILED:
+                raise RuntimeError("任务已被用户手动停止")
             executor = self.task_executors.get(task_type)
             if executor:
                 log.info(f"[Scheduler] >>> 开始执行云端任务: {task_id} ({task_type}), executor={executor.__module__}.{executor.__name__}")
@@ -229,9 +244,12 @@ class TaskScheduler:
                 if output_queue:
                     output_queue.put(None)
         except Exception as e:
-            error_msg = f"Cloud task execution failed: {str(e)}"
-            log.error(f"[Scheduler] {error_msg}", exc_info=True)
-            TaskManager.update_task(task_id, TaskManager.STATUS_FAILED, {"message": error_msg})
+            if "任务已被用户手动停止" in str(e):
+                log.info(f"[Scheduler] Cloud task {task_id} was cancelled by user.")
+            else:
+                error_msg = f"Cloud task execution failed: {str(e)}"
+                log.error(f"[Scheduler] {error_msg}", exc_info=True)
+            TaskManager.update_task(task_id, TaskManager.STATUS_FAILED, {"message": str(e)})
             if output_queue:
                 output_queue.put(None)
         finally:
@@ -275,6 +293,26 @@ class TaskScheduler:
                 log.info(f"[Scheduler] >>> 从队列取出: {task_id} ({task_type}), 剩余队列大小={self.task_queue.qsize()}")
 
                 log.info(f"[Scheduler] Processing task {task_id} ({task_type})")
+
+                task_info = TaskManager.get_task(task_id)
+                if task_info and task_info.get("status") == TaskManager.STATUS_FAILED:
+                    log.info(f"[Scheduler] Task {task_id} was cancelled before execution. Skipping.")
+                    self.task_queue.task_done()
+                    next_type = self._peek_next_task_type()
+                    next_info = {
+                        "type": "task_completed",
+                        "task_id": task_id,
+                        "next_task_id": None,
+                        "next_task_type": None,
+                        "next_track_mode": None,
+                    }
+                    if next_type:
+                        peek = self.task_queue.queue[0]
+                        next_info["next_task_id"] = peek["id"]
+                        next_info["next_task_type"] = next_type
+                        next_info["next_track_mode"] = peek.get("track_mode", self.task_track_modes.get(next_type, "poll"))
+                    ws_manager.broadcast_queue(next_info)
+                    continue
 
                 # 通知流式端点：任务已开始执行
                 if started_event:
@@ -450,10 +488,13 @@ class TaskScheduler:
                 if output_queue:
                     output_queue.put(None)
         except Exception as e:
-            error_msg = f"Task execution failed: {str(e)}"
-            log.error(f"[Scheduler] {error_msg}", exc_info=True)
+            if "任务已被用户手动停止" in str(e):
+                log.info(f"[Scheduler] Task {task_id} was cancelled by user.")
+            else:
+                error_msg = f"Task execution failed: {str(e)}"
+                log.error(f"[Scheduler] {error_msg}", exc_info=True)
             try:
-                TaskManager.update_task(task_id, TaskManager.STATUS_FAILED, {"message": error_msg})
+                TaskManager.update_task(task_id, TaskManager.STATUS_FAILED, {"message": str(e)})
             except Exception as update_error:
                 log.error(f"[Scheduler] Failed to update task status for {task_id}: {update_error}")
             if output_queue:

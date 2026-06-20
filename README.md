@@ -87,6 +87,21 @@ Content-Type: application/json
 GET /interface/tasks/{task_id}/status
 ```
 
+### 任务取消与中断
+
+```http
+POST /interface/tasks/{task_id}/cancel
+```
+
+返回：
+```json
+{
+  "code": 200,
+  "message": "Task be7fb062-8f1b-41ee-a8ba-4672e8ab5a3c cancel signal sent."
+}
+```
+此接口会立即向相关后端发送物理中断请求，并中止调度/执行线程的继续运行，以节省 GPU 算力和云端 API 费用。
+
 ### 队列广播 WebSocket（推荐）
 
 **一次连接，全程通知，无需轮询。**
@@ -341,6 +356,24 @@ python test/20260605/test_cover3sizes.py
 
 产物输出到 `test/20260605/outputs/` 下对应子目录。
 
+### 任务取消与物理中断测试 (`test/20260620/`)
+
+提供在后台生成中途执行取消操作的压力与正常流程测试用例。支持 ComfyUI、TTS，并能自动将成功的生成物拉取下载至 `test/20260620/outputs/`。
+
+| 用例 | 类型 | 说明 |
+|------|------|------|
+| `test_comfyui_single.py` | ComfyUI | 单任务生成/取消及生成物自动下载保存 |
+| `test_comfyui_multiple.py` | ComfyUI | 多任务批量排队生成与并行/排队取消 |
+| `test_tts_single.py` | TTS | 单任务语音配音生成与中途取消 |
+| `test_tts_multiple.py` | TTS | 多任务配音并发排队及取消测试 |
+
+运行示例：
+```powershell
+python test/20260620/test_comfyui_single.py
+```
+
+产物输出到 `test/20260620/outputs/` 下对应子目录。
+
 ## 配置
 
 - `config.yaml` — API 配置、任务映射、LLM 本地模型
@@ -422,6 +455,13 @@ src/
 ```
 
 ## 最近更新
+
+### v20260620
+- **全链路任务停止与物理中断机制**：新增 `POST /interface/tasks/{task_id}/cancel` 接口，支持在任务执行过程中中途取消。
+- **ComfyUI 双重物理中断**：同时从 API 路由层与执行循环层（主动+被动双保险）向 ComfyUI 后端发送 `/queue` 任务删除与 `/interrupt` 中断请求，防止由于 Websocket 阻塞导致的中断延迟。
+- **多后端物理中断集成**：LLM 大模型自动关闭连接以停止模型推理计费，TTS 语音合成自动退出状态轮询。
+- **日志净化与 Traceback 屏蔽**：屏蔽用户手动中止时产生的长段异常 Traceback，只在控制台输出友好提示 `任务已被用户手动停止`，确保日志清爽。
+- **20260620 测试套件**：添加了针对 ComfyUI/TTS 的单任务、多任务并发与排队物理取消测试，支持生成物自动下载并归档至 `test/20260620/outputs/`。
 
 ### v20260605
 - **ComfyUI 智能全局进度条**: 拦截并平滑化 ComfyUI 底层反复横跳的 WebSocket 进度，提供严格单调递增的 `overall_progress` 推送，实现 100% 零侵害后向兼容的完美商业级体验

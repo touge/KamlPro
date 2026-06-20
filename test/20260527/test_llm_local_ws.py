@@ -66,7 +66,8 @@ async def listen_task_via_ws(task_id: str, prefix: str = "[LLM WS]") -> dict:
                 elapsed = asyncio.get_event_loop().time() - start_time
                 
                 # 打印接收到的 WS 推送消息帧，方便前端观察真实的伪装 WS 数据结构
-                log_info(f"{prefix} 接收帧 ({elapsed:.1f}s): {msg}", "dim")
+                msg_display = msg_str if len(msg_str) <= 100 else msg_str[:100] + "..."
+                log_info(f"{prefix} 接收帧 ({elapsed:.1f}s): {msg_display}", "dim")
                 
                 msg_type = msg.get("type")
                 
@@ -111,17 +112,7 @@ async def poll_task_status(task_id: str, prefix: str = "[LLM 轮询]") -> dict:
             await asyncio.sleep(2.0)
 
 
-async def main():
-    log_info("==========================================================", "bold yellow")
-    log_info("    Kalm 本地大模型 (Ollama / 自适应路由模式) 测试用例     ", "bold yellow")
-    log_info("==========================================================", "bold yellow")
-    log_info(f"   目标模型     : {TEST_MODEL}")
-    log_info(f"   网关地址     : {BASE_URL}")
-    log_info(f"   WS 推送地址  : {WS_URL}")
-    log_info(f"   说明         : 提交任务后，程序读取 track_mode 自动决定使用 WS 监听还是 HTTP 轮询")
-    
-    prompt = "请用一句非常简短的话解释什么是量子计算。"
-    url = f"{BASE_URL}/interface/tasks/submit"
+async def submit_one_task(client, url, idx, prompt):
     payload = {
         "task_type": "llm",
         "payload": {
@@ -130,47 +121,88 @@ async def main():
             "options": {"temperature": 0.3, "max_tokens": 150}
         }
     }
+    log_info(f"[Local Stage] 发起第 {idx} 个本地大模型任务提交: POST {url}", "bold blue")
+    try:
+        resp = await client.post(url, json=payload, headers=HEADERS, timeout=10)
+        resp.raise_for_status()
+        resp_data = resp.json()
+        if resp_data.get("status") != "success":
+            log_info(f"[Local Stage] 任务 {idx} 提交失败: {resp_data}", "bold red")
+            return None
+        task_id = resp_data.get("data", {}).get("task_id")
+        track_mode = resp_data.get("data", {}).get("track_mode", "poll")
+        log_info(f"[Local Stage] 任务 {idx} 提交成功！task_id: {task_id} | track_mode: {track_mode}", "bold green")
+        return task_id, track_mode
+    except Exception as e:
+        log_info(f"[Local Stage] 任务 {idx} 提交异常: {e}", "bold red")
+        return None
+
+async def track_one_task(idx, task_id, track_mode):
+    if not task_id:
+        return
+    try:
+        # ---- 智能分流决定客户端的拉取策略 ----
+        if track_mode == "ws":
+            log_info(f"[Local Stage] 任务 {idx} ({task_id}) 启动 WebSocket 实时收听...", "cyan")
+            ws_msg = await listen_task_via_ws(task_id, prefix=f"[LLM WS {idx}]")
+            result = ws_msg.get("result", {})
+        elif track_mode == "poll":
+            log_info(f"[Local Stage] 任务 {idx} ({task_id}) 启动 HTTP 轮询...", "cyan")
+            task_data = await poll_task_status(task_id, prefix=f"[LLM 轮询 {idx}]")
+            result = task_data.get("result", {})
+        else:
+            log_info(f"[ERROR] 无法识别的 track_mode: {track_mode}", "bold red")
+            return
+        
+        # 提取最终推理出的结果
+        text = result.get("text", "").strip()
+        text_display = text if len(text) <= 100 else text[:100] + "..."
+        duration_ns = result.get("total_duration")
+        duration_s = f"{duration_ns / 1e9:.2f}s" if duration_ns else "N/A"
+        
+        console.print(f"\n[bold yellow]─── 任务 {idx} 推理结果预览 (本地 Ollama / 通过 {track_mode.upper()} 追踪) ───[/bold yellow]")
+        console.print(text_display)
+        console.print(f"[dim]推理真实耗时 (Ollama 内核): {duration_s}[/dim]")
+        console.print("[bold yellow]────────────────────────────────────────────────────────[/bold yellow]\n")
+        log_info(f"[Local Stage] 本地大模型任务 {idx} 验证成功！\n", "bold green")
+    except Exception as e:
+        log_info(f"[Local Stage] 任务 {idx} 追踪异常: {e}", "bold red")
+
+async def main():
+    log_info("==========================================================", "bold yellow")
+    log_info("    Kalm 本地大模型 (Ollama / 自适应路由模式) 测试用例     ", "bold yellow")
+    log_info("==========================================================", "bold yellow")
+    log_info(f"   目标模型     : {TEST_MODEL}")
+    log_info(f"   网关地址     : {BASE_URL}")
+    log_info(f"   WS 推送地址  : {WS_URL}")
+    log_info(f"   说明         : 并发提交 3 个大模型任务，验证底层队列和自适应追踪机制")
     
-    log_info(f"[Local Stage] 发起本地大模型任务提交: POST {url}", "bold blue")
+    prompts = [
+        "第一回：解释量子计算的基础概念。",
+        "第二回：介绍量子比特与传统比特的区别。",
+        "第三回：量子计算的主要应用场景是什么？"
+    ]
+    
+    url = f"{BASE_URL}/interface/tasks/submit"
     
     try:
         async with httpx.AsyncClient() as client:
-            resp = await client.post(url, json=payload, headers=HEADERS, timeout=10)
-            resp.raise_for_status()
-            resp_data = resp.json()
+            # 1. 一起并发提交所有任务
+            submit_futures = []
+            for idx, prompt in enumerate(prompts, 1):
+                submit_futures.append(submit_one_task(client, url, idx, prompt))
             
-            if resp_data.get("status") != "success":
-                log_info(f"[Local Stage] 提交失败: {resp_data}", "bold red")
-                return
-                
-            task_id = resp_data.get("data", {}).get("task_id")
-            track_mode = resp_data.get("data", {}).get("track_mode", "poll")
-            log_info(f"[Local Stage] 任务提交成功！task_id: {task_id} | 路由 track_mode: {track_mode}", "bold green")
+            submit_results = await asyncio.gather(*submit_futures)
             
-            # ---- 智能分流决定客户端的拉取策略 ----
-            if track_mode == "ws":
-                log_info("[Local Stage] 检测到 track_mode='ws'，启动 WebSocket 被动收听策略...", "cyan")
-                ws_msg = await listen_task_via_ws(task_id, prefix="[LLM WS]")
-                result = ws_msg.get("result", {})
-            elif track_mode == "poll":
-                log_info("[Local Stage] 检测到 track_mode='poll'，启动 HTTP 周期轮询降级策略...", "cyan")
-                task_data = await poll_task_status(task_id, prefix="[LLM 轮询]")
-                result = task_data.get("result", {})
-            else:
-                log_info(f"[ERROR] 无法识别的 track_mode: {track_mode}", "bold red")
-                return
+            # 2. 一起并发追踪所有任务
+            track_futures = []
+            for idx, res in enumerate(submit_results, 1):
+                if res:
+                    task_id, track_mode = res
+                    track_futures.append(track_one_task(idx, task_id, track_mode))
             
-            # 提取最终推理出的结果
-            text = result.get("text", "").strip()
-            duration_ns = result.get("total_duration")
-            duration_s = f"{duration_ns / 1e9:.2f}s" if duration_ns else "N/A"
+            await asyncio.gather(*track_futures)
             
-            console.print(f"\n[bold yellow]─── 推理结果预览 (本地 Ollama / 通过 {track_mode.upper()} 追踪) ───[/bold yellow]")
-            console.print(text)
-            console.print(f"[dim]推理真实耗时 (Ollama 内核): {duration_s}[/dim]")
-            console.print("[bold yellow]────────────────────────────────────────────────────────[/bold yellow]\n")
-            log_info(f"[Local Stage] 本地大模型 {track_mode.upper()} 模式验证成功！", "bold green")
-                
     except httpx.ConnectError:
         log_info("\n[ERROR] 无法连接到 Kalm 网关，请先启动服务: run.bat / main.py", "bold red")
     except Exception as e:

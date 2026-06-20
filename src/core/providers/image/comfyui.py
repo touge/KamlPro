@@ -21,6 +21,16 @@ from src.utils import translate_workflow_paths
 from src.core.providers.image.base import BaseImageProvider, register_image_provider
 
 
+def log_cancel_debug(msg: str):
+    import datetime
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+    try:
+        with open("cancel_debug.log", "a", encoding="utf-8") as f:
+            f.write(f"[{timestamp}] [ComfyUI_Client] {msg}\n")
+    except Exception:
+        pass
+
+
 @register_image_provider("comfyui")
 class ComfyUIProvider(BaseImageProvider):
     def generate_image(self, payload: Dict[str, Any], progress_callback: callable) -> Dict[str, Any]:
@@ -76,7 +86,7 @@ class ComfyUIProvider(BaseImageProvider):
         client = _ComfyUIClient(host, port)
 
         log.info(f"[ComfyUI Provider] >>> task_id={task_id} 开始提交 workflow 到 ComfyUI...")
-        final_outputs = client.run_workflow(workflow, client_id, progress_callback, output_node_ids)
+        final_outputs = client.run_workflow(task_id, workflow, client_id, progress_callback, output_node_ids)
         log.info(f"[ComfyUI Provider] >>> task_id={task_id} workflow 执行完成")
         return final_outputs
 
@@ -90,17 +100,36 @@ class _ComfyUIClient:
         self.base_url = f"http://{server_address}:{port}"
         self.ws_url = f"ws://{server_address}:{port}/ws"
 
-    def run_workflow(self, workflow: dict, client_id: str, message_callback: callable, output_node_ids: list = None) -> dict:
+    def run_workflow(self, task_id: str, workflow: dict, client_id: str, message_callback: callable, output_node_ids: list = None) -> dict:
+        from src.core.task_manager import TaskManager
+
+        if TaskManager.is_cancelled(task_id):
+            raise RuntimeError("任务已被用户手动停止")
+
         log.info(f"[ComfyUI Client] >>> _queue_prompt 开始...")
         prompt_id = self._queue_prompt(workflow, client_id)
         log.info(f"[ComfyUI Client] >>> _queue_prompt 完成, prompt_id={prompt_id}")
+
+        if TaskManager.is_cancelled(task_id):
+            self._delete_from_queue(prompt_id)
+            self._interrupt()
+            raise RuntimeError("任务已被用户手动停止")
+
+        # 注册 ComfyUI 任务元数据，便于取消时查找对应的 prompt_id 和服务端口
+        TaskManager.set_cancel_metadata(task_id, {
+            "engine_type": "comfyui",
+            "prompt_id": prompt_id,
+            "server_address": self.server_address,
+            "port": self.port
+        })
+
         message_callback({"status": "queued", "prompt_id": prompt_id})
 
         total_nodes = len(workflow.keys()) if isinstance(workflow, dict) else 1
         interceptor = ComfyProgressInterceptor(message_callback, total_nodes)
 
         log.info(f"[ComfyUI Client] >>> _track_progress 开始, prompt_id={prompt_id}, total_nodes={total_nodes}")
-        self._track_progress(prompt_id, client_id, interceptor)
+        self._track_progress(task_id, prompt_id, client_id, interceptor)
         log.info(f"[ComfyUI Client] >>> _track_progress 完成, prompt_id={prompt_id}")
         
         # 兜底收尾：全部执行完成，发送最终的 100%
@@ -138,21 +167,55 @@ class _ComfyUIClient:
     def _queue_prompt(self, prompt: dict, client_id: str) -> str:
         data = json.dumps({"prompt": prompt, "client_id": client_id}).encode("utf-8")
         req = urllib.request.Request(f"{self.base_url}/prompt", data=data,
-            headers={"Content-Type": "application/json"})
+            headers={"Content-Type": "application/json"}, method="POST")
         with urllib.request.urlopen(req) as resp:
             return json.loads(resp.read().decode())["prompt_id"]
+
+    def _delete_from_queue(self, prompt_id: str):
+        log_cancel_debug(f"_delete_from_queue called for prompt_id={prompt_id}")
+        try:
+            data = json.dumps({"action": "delete", "delete": [prompt_id]}).encode("utf-8")
+            req = urllib.request.Request(f"{self.base_url}/queue", data=data,
+                headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req) as resp:
+                resp_data = resp.read()
+                log.info(f"[ComfyUI Client] Queue delete prompt {prompt_id} response: {resp_data}")
+                log_cancel_debug(f"_delete_from_queue success: response={resp_data}")
+        except Exception as e:
+            log.warning(f"[ComfyUI Client] Failed to delete prompt {prompt_id} from queue: {e}")
+            log_cancel_debug(f"_delete_from_queue failed: {e}")
+
+    def _interrupt(self):
+        log_cancel_debug(f"_interrupt called")
+        try:
+            req = urllib.request.Request(f"{self.base_url}/interrupt", data=b"{}",
+                headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req) as resp:
+                resp_data = resp.read()
+                log.info(f"[ComfyUI Client] Interrupt response: {resp_data}")
+                log_cancel_debug(f"_interrupt success: response={resp_data}")
+        except Exception as e:
+            log.warning(f"[ComfyUI Client] Failed to interrupt execution: {e}")
+            log_cancel_debug(f"_interrupt failed: {e}")
 
     def _get_history(self, prompt_id: str) -> dict:
         with urllib.request.urlopen(f"{self.base_url}/history/{prompt_id}") as resp:
             return json.loads(resp.read().decode())
 
-    def _track_progress(self, prompt_id: str, client_id: str, message_callback: callable):
+    def _track_progress(self, task_id: str, prompt_id: str, client_id: str, message_callback: callable):
+        from src.core.task_manager import TaskManager
         ws = websocket.create_connection(f"{self.ws_url}?clientId={client_id}", timeout=30)
         ws.settimeout(30)
         try:
             last_msg_time = time.time()
             max_idle_seconds = 60  # 1 分钟无新消息视为超时
             while True:
+                if TaskManager.is_cancelled(task_id):
+                    log.info(f"[ComfyUI Client] Task {task_id} was cancelled during tracking. Closing WS, deleting queue, interrupting, and raising exception.")
+                    log_cancel_debug(f"TaskManager.is_cancelled detected in _track_progress for task_id={task_id}, prompt_id={prompt_id}")
+                    self._delete_from_queue(prompt_id)
+                    self._interrupt()
+                    raise RuntimeError("任务已被用户手动停止")
                 try:
                     msg = ws.recv()
                 except websocket.WebSocketTimeoutException:
@@ -183,3 +246,4 @@ class _ComfyUIClient:
         finally:
             ws.close()
             log.info(f"[ComfyUI Client] >>> _track_progress WS 已关闭, prompt_id={prompt_id}")
+

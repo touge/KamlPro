@@ -48,6 +48,9 @@ def execute(task_id: str, **payload):
             "message": "Image generation completed", "outputs": final_outputs})
 
     except Exception as e:
-        log.error(f"[Image Executor] >>> task_id={task_id} 执行失败: {e}", exc_info=True)
+        if "任务已被用户手动停止" in str(e):
+            log.info(f"[Image Executor] >>> task_id={task_id} 任务已被用户手动停止。")
+        else:
+            log.error(f"[Image Executor] >>> task_id={task_id} 执行失败: {e}", exc_info=True)
         TaskManager.update_task(task_id, TaskManager.STATUS_FAILED, {"message": str(e)})
         ws_manager.send(task_id, {"type": "task_failed", "message": str(e)})

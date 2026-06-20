@@ -47,6 +47,9 @@ def execute(task_id: str, **payload):
         ws_manager.send(task_id, {"type": "task_complete", "status": "success", "result": status_data})
 
     except Exception as e:
-        log.error(f"[TTS Executor] >>> Task {task_id} 语音合成失败: {e}", exc_info=True)
+        if "任务已被用户手动停止" in str(e):
+            log.info(f"[TTS Executor] >>> Task {task_id} 任务已被用户手动停止。")
+        else:
+            log.error(f"[TTS Executor] >>> Task {task_id} 语音合成失败: {e}", exc_info=True)
         TaskManager.update_task(task_id, TaskManager.STATUS_FAILED, {"message": str(e)})
         ws_manager.send(task_id, {"type": "task_failed", "message": str(e)})

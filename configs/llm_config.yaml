@@ -12,10 +12,10 @@ providers:
     api_key: ""
     models:
       - name: "gemma3:12b"
-        tier: "sentinel"
+        tier: "local"
         display_name: "Gemma 3 (本地离线 / 12B)"
       - name: "qwen3:14b"
-        tier: "sentinel"
+        tier: "local"
         display_name: "通义千问 3 (本地离线 / 14B)"
 
   # 🔵 线上 DeepSeek 官方 API (兼容 OpenAI 接口协议)
@@ -25,10 +25,10 @@ providers:
     api_key: "${DEEPSEEK_API_KEY}"
     models:
       - name: "deepseek-v4-flash"
-        tier: "value"
+        tier: "api"
         display_name: "DeepSeek V4 Flash (极速 / 降本首选)"
       - name: "deepseek-v4-pro"
-        tier: "premium"
+        tier: "api"
         display_name: "DeepSeek V4 Pro (高保真 / 旗舰思考)"
         
 # ============================================================================

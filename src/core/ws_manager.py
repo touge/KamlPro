@@ -138,23 +138,17 @@ class WebSocketManager:
         # 快照订阅者列表（锁内），发送在锁外，避免阻塞
         with self._queue_lock:
             snapshot = list(self._queue_subscribers.items())
-        dead_ids = []
         for ws_id, ws in snapshot:
-            future = asyncio.run_coroutine_threadsafe(
+            asyncio.run_coroutine_threadsafe(
                 self._send_queue_async(ws_id, ws, message), self._loop
             )
-            try:
-                future.result(timeout=2)
-            except Exception:
-                dead_ids.append(ws_id)
-        for ws_id in dead_ids:
-            self.unsubscribe_queue(ws_id)
 
     async def _send_queue_async(self, ws_id: str, ws: WebSocket, message: dict):
         try:
             await ws.send_json(message)
         except Exception:
-            pass  # 连接已断，由 broadcast_queue 统一清理
+            log.warning(f"[WSManager] Failed to broadcast to queue subscriber {ws_id}, disconnecting")
+            self.unsubscribe_queue(ws_id)
 
 
 ws_manager = WebSocketManager()

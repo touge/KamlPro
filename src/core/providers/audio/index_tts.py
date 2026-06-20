@@ -53,6 +53,15 @@ class IndexTTSProvider(BaseAudioProvider):
 
         log.info(f"[IndexTTS Provider] Task {task_id} submitted -> {svc_task_id}")
 
+        # 注册取消元数据，便于中途取消轮询和物理取消任务
+        from src.core.task_manager import TaskManager
+        TaskManager.set_cancel_metadata(task_id, {
+            "engine_type": "tts",
+            "svc_task_id": svc_task_id,
+            "base_url": base_url,
+            "headers": headers
+        })
+
         # 2. 轮询状态直到成功或失败
         return self._poll_status(task_id, base_url, svc_task_id, headers, progress_callback)
 
@@ -100,12 +109,25 @@ class IndexTTSProvider(BaseAudioProvider):
 
         log.info(f"[IndexTTS Provider] Task {task_id} alignment submitted -> {svc_task_id}")
 
+        # 注册取消元数据，便于中途取消轮询和物理取消任务
+        from src.core.task_manager import TaskManager
+        TaskManager.set_cancel_metadata(task_id, {
+            "engine_type": "tts",
+            "svc_task_id": svc_task_id,
+            "base_url": base_url,
+            "headers": headers
+        })
+
         # 2. 轮询状态直到成功或失败
         return self._poll_status(task_id, base_url, svc_task_id, headers, progress_callback)
 
     def _poll_status(self, task_id: str, base_url: str, svc_task_id: str, headers: dict, progress_callback: callable) -> dict:
+        from src.core.task_manager import TaskManager
         elapsed = 0
         while elapsed < MAX_POLL_SECONDS:
+            if TaskManager.is_cancelled(task_id):
+                log.info(f"[IndexTTS Provider] Task {task_id} was cancelled during polling. Aborting.")
+                raise RuntimeError("任务已被用户手动停止")
             time.sleep(POLL_INTERVAL)
             elapsed += POLL_INTERVAL
 

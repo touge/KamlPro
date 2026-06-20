@@ -146,3 +146,110 @@ async def get_task_status(task_id: str):
         return error(f"Task '{task_id}' not found", 404)
 
     return success(data=task)
+
+
+def log_cancel_debug(msg: str):
+    import datetime
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+    try:
+        with open("cancel_debug.log", "a", encoding="utf-8") as f:
+            f.write(f"[{timestamp}] [API_Route] {msg}\n")
+    except Exception:
+        pass
+
+
+@router.post("/tasks/{task_id}/cancel")
+async def cancel_task(task_id: str):
+    import urllib.request
+    from src.core.ws_manager import ws_manager
+
+    task = TaskManager.get_task(task_id)
+    status = task.get("status")
+    log_cancel_debug(f"cancel_task called for task_id={task_id}, status={status}")
+
+    if status == "not_found":
+        log_cancel_debug(f"task_id={task_id} not found")
+        return error(f"Task '{task_id}' not found", 404)
+
+    if status in (TaskManager.STATUS_SUCCESS, TaskManager.STATUS_FAILED):
+        log_cancel_debug(f"task_id={task_id} is already finished (status={status})")
+        return success(message="Task is already finished", data={"task_id": task_id})
+
+    # 1. 注册并触发中止信号
+    TaskManager.register_abort_event(task_id).set()
+    log_cancel_debug(f"abort event registered and set for task_id={task_id}")
+
+    # 2. 如果任务正在运行，根据取消元数据调用对应物理后端的中断接口
+    if status == TaskManager.STATUS_RUNNING:
+        cancel_metadata = TaskManager.get_cancel_metadata(task_id)
+        engine_type = cancel_metadata.get("engine_type")
+        log_cancel_debug(f"task_id={task_id} is running, cancel_metadata={cancel_metadata}")
+
+        if engine_type == "comfyui":
+            prompt_id = cancel_metadata.get("prompt_id")
+            server_addr = cancel_metadata.get("server_address")
+            port = cancel_metadata.get("port")
+            if prompt_id and server_addr and port:
+                base_url = f"http://{server_addr}:{port}"
+                log_cancel_debug(f"ComfyUI params: prompt_id={prompt_id}, base_url={base_url}")
+                
+                # 从 ComfyUI 队列删除
+                try:
+                    data = json.dumps({"action": "delete", "delete": [prompt_id]}).encode("utf-8")
+                    req = urllib.request.Request(f"{base_url}/queue", data=data,
+                        headers={"Content-Type": "application/json"}, method="POST")
+                    with urllib.request.urlopen(req) as resp:
+                        resp_data = resp.read()
+                        log.info(f"[Cancel] ComfyUI queue delete prompt {prompt_id} response: {resp_data}")
+                        log_cancel_debug(f"ComfyUI queue delete success, response={resp_data}")
+                except Exception as e:
+                    log.warning(f"[Cancel] Failed to delete ComfyUI prompt {prompt_id} from queue: {e}")
+                    log_cancel_debug(f"ComfyUI queue delete failed: {e}")
+
+                # 中断 ComfyUI 当前执行
+                try:
+                    req = urllib.request.Request(f"{base_url}/interrupt", data=b"{}",
+                        headers={"Content-Type": "application/json"}, method="POST")
+                    with urllib.request.urlopen(req) as resp:
+                        resp_data = resp.read()
+                        log.info(f"[Cancel] ComfyUI interrupt response: {resp_data}")
+                        log_cancel_debug(f"ComfyUI interrupt success, response={resp_data}")
+                except Exception as e:
+                    log.warning(f"[Cancel] Failed to interrupt ComfyUI execution: {e}")
+                    log_cancel_debug(f"ComfyUI interrupt failed: {e}")
+            else:
+                log_cancel_debug(f"ComfyUI metadata incomplete: prompt_id={prompt_id}, server_addr={server_addr}, port={port}")
+
+        elif engine_type == "tts":
+            svc_task_id = cancel_metadata.get("svc_task_id")
+            base_url = cancel_metadata.get("base_url")
+            headers = cancel_metadata.get("headers", {})
+            if svc_task_id and base_url:
+                try:
+                    cancel_url = f"{base_url}/cancel/{svc_task_id}"
+                    req = urllib.request.Request(cancel_url, data=b"")
+                    for k, v in headers.items():
+                        req.add_header(k, v)
+                    with urllib.request.urlopen(req) as resp:
+                        resp_data = resp.read()
+                        log.info(f"[Cancel] TTS cancel response: {resp_data}")
+                        log_cancel_debug(f"TTS cancel success, response={resp_data}")
+                except Exception as e:
+                    log.warning(f"[Cancel] Failed to cancel TTS task {svc_task_id}: {e}")
+                    log_cancel_debug(f"TTS cancel failed: {e}")
+
+    # 3. 更新任务状态为 FAILED (错误信息为：任务已被用户手动停止)
+    TaskManager.update_task(task_id, TaskManager.STATUS_FAILED, {"message": "任务已被用户手动停止"})
+
+    # 4. 触发 WebSocket 广播事件（全局 Queue 频道 + 任务专有频道）
+    ws_manager.send(task_id, {"type": "task_failed", "message": "任务已被用户手动停止"})
+    ws_manager.broadcast_queue({
+        "type": "task_failed",
+        "task_id": task_id,
+        "message": "任务已被用户手动停止"
+    })
+
+    log.info(f"[API] Task {task_id} cancellation initiated successfully.")
+    log_cancel_debug(f"cancel_task complete for task_id={task_id}")
+    return success(message="Task cancellation initiated", data={"task_id": task_id})
+
