@@ -1,5 +1,24 @@
 # Changelog
 
+## [Unreleased] - 2026-07-30
+
+### 🔧 服务控制器 cmd 类型扩展
+
+扩展 `cmd` 类型服务的启动方式，支持批处理文件直接启动。
+
+- **双模式支持**: `cmd` 类型新增 `path` 字段支持，通过 `cmd /c` 直接启动 `.bat` 批处理文件，保留原有 `command` 字段通过 `powershell -Command` 执行的方式
+- **ComfyUI 启动路径迁移**: Windows 平台改用 `KamlPro-service/launcher.bat` 替代旧版 `run.ps1`，Linux 平台同步更新为 `KamlPro-service/launcher.sh`
+- **平台类型调整**: ComfyUI Windows 平台配置类型由 `ps1` 改为 `cmd`
+
+### 🧹 日志过滤优化
+
+减少控制台无效日志刷屏，提升开发体验。
+
+- **403 日志过滤**: 新增过滤规则，屏蔽第三方/无效客户端向非目标子服务发起 WebSocket 连接时产生的 `403 Forbidden` 和 `connection rejected/closed` 日志
+- 仅影响控制台输出，不影响错误定位与调试
+
+---
+
 ## [Unreleased] - 2026-06-05
 
 ### 🎯 ComfyUI 智能进度拦截器

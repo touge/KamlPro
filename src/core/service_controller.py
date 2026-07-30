@@ -325,8 +325,17 @@ class _ServiceController:
 
             cmd = [sh_path, "--port", str(port)]
         elif svc["type"] == "cmd":
-            # 直接命令方式
-            cmd = ["powershell", "-Command", svc["command"]]
+            # cmd 类型支持两种形式：
+            #   1. command: "ollama serve"  → 通过 powershell -Command 执行
+            #   2. path: "xxx.bat"          → 通过 cmd /c 启动批处理文件
+            if "path" in svc:
+                bat_path = str(Path(svc["path"]))
+                cmd = ["cmd", "/c", bat_path, "--port", str(port)]
+            elif "command" in svc:
+                cmd = ["powershell", "-Command", svc["command"]]
+            else:
+                log.error(f"Service '{key}' type=cmd but no 'command' or 'path' defined.")
+                return None
         else:
             log.error(f"Unknown service type: {svc['type']}")
             return None
@@ -669,6 +678,9 @@ class _ServiceController:
                 # 过滤 Ollama 逐 token 的流式响应日志（NDJSON格式，非服务本身日志）
                 # 特征：以 '{' 开头且包含 "response" 或 "done" 字段
                 if clean_line.startswith('{') and ('"response"' in clean_line or '"done"' in clean_line):
+                    continue
+                # 过滤第三方/无效客户端向非目标子服务（如向 TTS 发起 ComfyUI 的 /ws 握手）造成的 403 刷屏日志
+                if "WebSocket /ws" in clean_line or "connection rejected (403 Forbidden)" in clean_line or "connection closed" in clean_line:
                     continue
                 log.info(f"[{service_name}] {clean_line}")
             log.info(f"Service '{service_name}' has exited.")

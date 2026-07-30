@@ -456,6 +456,11 @@ src/
 
 ## 最近更新
 
+### v20260730
+- **服务控制器 cmd 类型扩展**: `cmd` 类型服务新增 `path` 字段支持，可通过 `cmd /c` 直接启动 `.bat` 批处理文件，保留原有 `command` 字段的 `powershell -Command` 执行方式
+- **ComfyUI 启动路径迁移**: Windows 平台改用 `KamlPro-service/launcher.bat` 替代旧版 `run.ps1`，平台类型由 `ps1` 改为 `cmd`；Linux 平台同步更新为 `KamlPro-service/launcher.sh`
+- **日志过滤优化**: 新增 403 屏蔽规则，过滤第三方/无效客户端向非目标子服务发起 WebSocket 连接时产生的 `403 Forbidden` 和 `connection rejected/closed` 刷屏日志
+
 ### v20260620
 - **全链路任务停止与物理中断机制**：新增 `POST /interface/tasks/{task_id}/cancel` 接口，支持在任务执行过程中中途取消。
 - **ComfyUI 双重物理中断**：同时从 API 路由层与执行循环层（主动+被动双保险）向 ComfyUI 后端发送 `/queue` 任务删除与 `/interrupt` 中断请求，防止由于 Websocket 阻塞导致的中断延迟。

@@ -48,12 +48,14 @@ ComfyUI:
   # 平台特异性覆盖与扩展
   platforms:
     windows:
-      type: ps1
-      path: "D:/AIGC/ComfyUI/run.ps1"
+      type: cmd
+      # path: "D:/AIGC/ComfyUI/ComfyUI260504/run.ps1"
+      path: "D:/AIGC/ComfyUI/KamlPro-service/launcher.bat"
+      # path: "D:/AIGC/ComfyUI/KamlPro-service/launcher.ps1"
     
     linux:
       type: sh
-      path: "/root/workspace/comfyui/run.sh"
+      path: "/root/workspace/comfyui/KamlPro-service/launcher.sh"
       env:
         CUDA_VISIBLE_DEVICES: "0"
         PYTHONUNBUFFERED: "1"
