@@ -1,11 +1,22 @@
 # ============================================================================
-# LLM 统一大模型提供商与路由配置
+# LLM 统一大模型提供商与路由配置文件 (configs/llm_config.yaml)
 # ============================================================================
-# 声明大模型的底座提供商。包含本地微服务与云端 API 服务。
-# 支持 ${ENV_VAR} 语法加载环境变量中的密钥凭证。
+# 此文件专门用于配置 LLM 模型的名称、路由和云端 API 密钥。
+#
+# ----------------------------------------------------------------------------
+# 控制开关单一原则 (Single Point of Truth)：
+# ----------------------------------------------------------------------------
+# 1. 本地微服务 (如 Ollama)：
+#    开关由 `configs/services.yaml` 中的 `Ollama` 节点唯一控制。
+#    当 services.yaml 中 Ollama enabled: false 时，此处的 Ollama 模型会自动失效，无需在此重复设置开关。
+#
+# 2. 线上云端 API (如 DeepSeek / OpenAI / Moonshot 等)：
+#    无本地子进程，开关在此处的 Provider 节点下统一控制（设置 `enabled: false` 即可停用该云端 API）。
+# ============================================================================
 
 providers:
   # 🟢 本地离线推理服务 (Ollama)
+  # （服务开关、端口与后台子进程统一由 configs/services.yaml 控制）
   ollama:
     type: "ollama"
     base_url: "http://127.0.0.1:11434"
@@ -19,19 +30,23 @@ providers:
         display_name: "通义千问 3 (本地离线 / 14B)"
 
   # 🔵 线上 DeepSeek 官方 API (兼容 OpenAI 接口协议)
+  # （纯远程 API，开关在此处通过 enabled 字段控制）
   deepseek:
+    enabled: true                  # 🟢 设为 false 即可禁用此远程 API 提供商
     type: "openai_compatible"
     base_url: "https://api.deepseek.com"
     api_key: "${DEEPSEEK_API_KEY}"
     models:
       - name: "deepseek-v4-flash"
+        enabled: true
         tier: "api"
         display_name: "DeepSeek V4 Flash (极速 / 降本首选)"
       - name: "deepseek-v4-pro"
+        enabled: true
         tier: "api"
         display_name: "DeepSeek V4 Pro (高保真 / 旗舰思考)"
-        
+
 # ============================================================================
-# 全局大模型调度配置 (单层扁平化配置)
+# 全局大模型调度配置
 # ============================================================================
-api_concurrency_limit: 1     # 云端 API 并发限制（设为 2 便于多轮排队测试）
+api_concurrency_limit: 1     # 云端 API 并发限制

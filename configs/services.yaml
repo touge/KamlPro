@@ -1,45 +1,98 @@
 # ============================================================================
-# Kalm 后端子进程服务定义
+# Kalm 后端子进程服务定义配置文件 (services.yaml)
 # ============================================================================
-# 字段说明：
-#   type             : 启动方式 — "cmd" 直接运行命令 / "ps1" 执行 PowerShell 脚本 / "sh" 执行 Linux bash 脚本
-#   host             : 服务监听地址（默认 127.0.0.1，仅本地可访问）
-#   port             : 服务监听端口（需与后端实际端口一致）
-#   ready_keyword    : 启动完成标志 — 匹配 stdout 中的关键词，出现后认为服务就绪
-#   manage_lifecycle : true = Kalm 管理该服务的启停 / false = 外部管理，Kalm 不干预
-#   stop_command     : (仅 cmd 类型) 自定义停止命令，用于优雅关闭而非直接 kill 进程
-#   token            : (可选) API 鉴权 token，Kalm 转发请求时会附带
-#   env              : (可选) 子进程环境变量，格式为 KEY: "value"
-#   free_api         : (可选) 资源释放接口配置，无此配置则跳过释放
-#     path            : 释放接口路径（如 /api/free），会拼接在 host:port 之后
-#     body            : POST 请求体（JSON），具体字段由后端服务决定
+# 此文件定义了系统所依赖的所有后端微服务进程（如 Ollama、ComfyUI、TTS 等）。
+# 包含了每个服务的物理启动路径、端口监听、就绪判定以及生命周期管理行为。
 #
-# 注意：V3 版本采用了级联继承覆盖设计。最外层配置公共参数，在 platforms 下根据
-#       当前运行操作系统（windows / linux / darwin）进行特异性差异覆盖。
+# ----------------------------------------------------------------------------
+# 核心配置字段详解（字段说明书）：
+# ----------------------------------------------------------------------------
+# 1. enabled [Boolean] (可选，默认 true)
+#    - 服务总开关。若设为 false，该服务将被完全禁用。
+#    - 联动逻辑：关联此服务的所有 Task 任务及 LLM 提供商均会自动跳过注册与加载。
+#
+# 2. auto_start [Boolean] (可选，默认 false)
+#    - 是否在 Kalm 主程序启动时自动拉起该后台子进程服务。
+#    - 设为 true 时，无需等待第一个 Task 任务到达即可完成服务就绪准备。
+#
+# 3. manage_lifecycle [Boolean] (必填，默认 true)
+#    - 是否由 Kalm 控制该服务的物理生命周期（即按需启动、端口匹配、自动强杀与回收）。
+#    - true  : 内部托管模式。Kalm 负责通过 cmd/ps1/sh 启动子进程，监控 stdout 就绪状态，
+#              并在任务空闲超时后自动回收进程。
+#    - false : 外部托管模式。用户在系统外部自行拉起服务（如本地独立运行的第三方软件），
+#              Kalm 不干预进程启停，仅校验 host:port 端口连接与数据转发。
+#
+# 4. type [String] (仅 manage_lifecycle: true 时生效)
+#    - 进程启动命令的执行类型：
+#      - "cmd" : 命令行执行（支持直接运行 CLI 命令如 "ollama serve"，或启动 .bat 批处理脚本）。
+#      - "ps1" : 执行 Windows PowerShell 脚本（会自动附加 -Port 参数）。
+#      - "sh"  : 执行 Linux Shell 脚本（会自动赋权 +x 并附加 --port 参数）。
+#
+# 5. path [String] (与 type 结合使用)
+#    - 对应启动脚本或批处理文件的绝对/相对路径。
+#
+# 6. command [String] (仅 type="cmd" 时可选)
+#    - 直接在 Shell 中执行的 CLI 命令（如 "ollama serve"）。若指定了 path，则优先使用 path。
+#
+# 7. host [String] (必填)
+#    - 后端服务监听的 IP 地址或 Host 前缀（默认 "http://127.0.0.1"）。
+#
+# 8. port [Integer] (必填)
+#    - 后端服务实际监听的网络端口号（必须与后端服务内部配置保持一致）。
+#
+# 9. ready_keyword [String] (必填)
+#    - 判定服务启动就绪的控制台日志关键词。
+#    - Kalm 会实时捕获子进程 stdout，当匹配到此关键词字符串时（如 "Listening" 或 "started"），
+#      即认定服务已成功启动并可以接受请求。
+#
+# 10. startup_timeout [Integer] (可选，默认 30 秒)
+#     - 等待服务启动就绪的最大超时时间（秒）。超过该时间未发现 ready_keyword 则判定启动失败并回滚。
+#
+# 11. stop_command [String] (可选)
+#     - 自定义优雅关闭/停止服务的命令（多用于 cmd 类型）。
+#     - 在终止子进程前执行（例如触发模型卸载 API），避免直接 kill 导致显存释放异常。
+#
+# 12. token [String] (可选)
+#     - 后端服务所需的 API 鉴权 Token。Kalm 在转发请求或建立 WebSocket 时会自动带上。
+#
+# 13. env [Dictionary] (可选)
+#     - 注入给子进程的特定环境变量（格式为 KEY: "VALUE"），如 CUDA_VISIBLE_DEVICES 等。
+#
+# 14. free_api [Dictionary] (可选)
+#     - 资源回收/显存释放接口配置。当任务处理完毕进入空闲时，Kalm 会自动调用此接口清空显存。
+#       - path: 接口相对路径（如 "/api/free"）
+#       - body: 请求体 JSON 内容（如 unload_models: true）
+#
+# 15. platforms [Dictionary] (可选，级联覆盖)
+#     - 跨平台自适应覆盖配置。可根据当前 OS (windows / linux / darwin) 覆写外层的属性（如 path、type、env）。
 # ============================================================================
 
 # ============================================================================
-# Ollama 服务（跨平台，使用直接命令启动）
+# 1. Ollama 服务（跨平台，使用直接 CLI 命令启动）
 # ============================================================================
 Ollama:
-  type: cmd
-  command: "ollama serve"
-  host: "http://127.0.0.1"
-  port: 11434
-  ready_keyword: "Listening"
+  enabled: false                    # 是否激活 Ollama 服务总开关
+  auto_start: true                # 是否随 Kalm 启动时自动拉起
+  type: cmd                        # 启动类型：直接 CLI 命令
+  command: "ollama serve"          # 启动命令行
+  host: "http://127.0.0.1"          # 服务主机
+  port: 11434                      # Ollama 默认监听端口
+  ready_keyword: "Listening"        # 控制台输出 Listening 即表示端口服务就绪
   stop_command: 'powershell -Command "Invoke-RestMethod -Uri http://127.0.0.1:11434/api/generate -Method Post -ContentType ''application/json'' -Body ''{\"model\": \"gemma3:12b\", \"prompt\": \"\", \"keep_alive\": 0, \"stream\": false, \"options\": {\"num_predict\": 0}}'' -ErrorAction SilentlyContinue"'
-  manage_lifecycle: true
+  manage_lifecycle: true           # 由 Kalm 自动按需启动和关闭进程
 
 # ============================================================================
-# ComfyUI 图像生成服务 (级联配置)
+# 2. ComfyUI 图像生成服务 (支持跨平台脚本级联继承)
 # ============================================================================
 ComfyUI:
+  enabled: true                    # 服务总开关
+  auto_start: true                 # Kalm 启动时自动预热拉起 ComfyUI
   host: "http://127.0.0.1"
-  port: 7001
-  ready_keyword: "To see the GUI go to"
-  manage_lifecycle: true
-  startup_timeout: 300
-  free_api:
+  port: 7011                       # ComfyUI 监听端口
+  ready_keyword: "To see the GUI go to"  # ComfyUI 就绪标志词
+  manage_lifecycle: true           # 托管生命周期
+  startup_timeout: 300             # 加载大模型可能较慢，超时设为 300 秒
+  free_api:                        # 空闲时调用的显存释放 API
     path: "/api/free"
     body:
       unload_models: true
@@ -49,9 +102,7 @@ ComfyUI:
   platforms:
     windows:
       type: cmd
-      # path: "D:/AIGC/ComfyUI/ComfyUI260504/run.ps1"
       path: "D:/AIGC/ComfyUI/KamlPro-service/launcher.bat"
-      # path: "D:/AIGC/ComfyUI/KamlPro-service/launcher.ps1"
     
     linux:
       type: sh
@@ -61,14 +112,16 @@ ComfyUI:
         PYTHONUNBUFFERED: "1"
 
 # ============================================================================
-# TTS 语音合成与 Whispering 服务 (级联配置)
+# 3. TTS 语音合成与 Whispering 服务 (支持跨平台级联)
 # ============================================================================
 TTS:
+  enabled: false                    # 服务总开关
+  auto_start: true                 # Kalm 启动时自动预热拉起 TTS
   host: "http://127.0.0.1"
-  port: 7002
-  token: "123456"
-  ready_keyword: "started"
-  manage_lifecycle: true
+  port: 7012                       # TTS 服务监听端口
+  token: "123456"                  # API 鉴权密钥
+  ready_keyword: "started"         # 就绪标志词
+  manage_lifecycle: true           # 托管生命周期
   
   # 平台特异性覆盖与扩展
   platforms:

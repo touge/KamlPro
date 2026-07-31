@@ -1,5 +1,23 @@
 # Changelog
 
+## [Unreleased] - 2026-07-31
+
+### 🎯 单一信任源 (Single Source of Truth) 服务控制架构
+
+解决本地微服务（Ollama / ComfyUI / TTS）在多文件间配置冗余与重复控制问题。
+
+- **`configs/services.yaml` 集中收口**: 物理微服务开关 (`enabled: true/false`) 与自启动预热 (`auto_start: true/false`) 统一收口在 `services.yaml`。
+- **全链路自动推导与无感静音**:
+  - `service_controller.py`: 新增 `is_enabled()` 核心状态判断，并在 `safe_start()`、`start()` 与 `_launch_process()` 中建立一票否决硬门禁（当 `enabled: false` 时禁止任何形式拉起子进程）；自动收集 `enabled: true` 且 `auto_start: true` 的服务进行预热拉起，向下兼容旧版 `config.yaml`。
+  - `scheduler.py`: 注册 Task 时校验关联服务状态，服务禁用时自动静音并跳过任务注册。
+  - `providers/llm/manager.py` & `providers/audio/manager.py`: 自发现机制与重载方法校验服务状态，完全跳过禁用模块的 import 与模型实例化。
+- **配置与文档解耦**:
+  - `config.yaml`: 废弃 `auto_start_services` 数组，由 `services.yaml` 唯一判定。
+  - `llm_config.yaml`: 移除 Ollama 等本地服务节点重复的 `enabled` 开关，专用于云端 API (DeepSeek 等) 的控制与模型元数据定义。
+  - 配置文件补全完整注释说明书。
+
+---
+
 ## [Unreleased] - 2026-07-30
 
 ### 🔧 服务控制器 cmd 类型扩展

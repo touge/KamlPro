@@ -80,8 +80,18 @@ class _ServiceController:
 
             self.services[key] = merged_config
 
-        # ---------- 从 config.yaml 读取 auto_start 服务列表 ----------
-        self.auto_start_services = yaml_config_loader.get("auto_start_services") or []
+        # ---------- 自动从 services.yaml 及 config.yaml 汇总 auto_start 服务列表 ----------
+        self.auto_start_services = []
+        for key, svc in self.services.items():
+            if isinstance(svc, dict) and svc.get("enabled", True) and svc.get("auto_start", False):
+                self.auto_start_services.append(key)
+
+        # 兼容性兜底：若 config.yaml 中存在旧版 auto_start_services 列表，合并之
+        config_auto = yaml_config_loader.get("auto_start_services") or []
+        for key in config_auto:
+            real_key = self._find_service_key(key)
+            if real_key and real_key not in self.auto_start_services:
+                self.auto_start_services.append(real_key)
 
         # 项目根目录（main.py 的父目录）
         self.script_root = Path(__file__).resolve().parent.parent
@@ -123,10 +133,23 @@ class _ServiceController:
         """判断服务是否在配置文件中定义。"""
         return self._find_service_key(name) is not None
 
-    def is_auto_start(self, service_name: str) -> bool:
-        """判断服务是否在 config.yaml 的 auto_start_services 列表中。"""
+    def is_enabled(self, service_name: str) -> bool:
+        """判断服务是否配置为启用（enabled: true，未在 services.yaml 定义的服务如云端 API 默认开启）。"""
         key = self._find_service_key(service_name)
-        return key in self.auto_start_services if key else False
+        if not key:
+            return True
+        svc = self.services.get(key, {})
+        return svc.get("enabled", True) if isinstance(svc, dict) else True
+
+    def is_auto_start(self, service_name: str) -> bool:
+        """判断服务是否配置为自动启动（支持 services.yaml 中 auto_start: true）。"""
+        key = self._find_service_key(service_name)
+        if not key:
+            return False
+        svc = self.services.get(key, {})
+        if isinstance(svc, dict) and not svc.get("enabled", True):
+            return False
+        return key in self.auto_start_services or (isinstance(svc, dict) and svc.get("auto_start", False))
 
     def get_service_config(self, service_name: str) -> dict | None:
         """获取服务的完整配置字典。"""
@@ -156,6 +179,8 @@ class _ServiceController:
         key = self._find_service_key(service_name)
         if not key:
             raise ValueError(f"Service '{service_name}' not defined in configuration.")
+        if not self.is_enabled(key):
+            raise RuntimeError(f"Service '{service_name}' is disabled in services.yaml")
         svc = self.services[key]
 
         # ---- auto_start：已在 Kalm 启动时运行就绪，仅验证端口 ----
@@ -302,6 +327,10 @@ class _ServiceController:
         启动前检测端口占用，避免重复启动冲突。
         auto_start 服务和普通 managed 服务共用此方法。
         """
+        if not self.is_enabled(key):
+            log.warning(f"Service '{key}' is disabled in services.yaml, skipping launch.")
+            return None
+
         port = svc.get("port")
         # 端口已被占用 → 跳过，避免端口冲突
         if port and self._get_pid_by_port(port):

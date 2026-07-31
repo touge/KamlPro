@@ -456,6 +456,11 @@ src/
 
 ## 最近更新
 
+### v20260731
+- **单一信任源 (Single Source of Truth) 服务控制架构**：所有本地物理微服务（Ollama / ComfyUI / TTS）的启用/禁用 (`enabled`) 与自启动预热 (`auto_start`) 统一收口在 `configs/services.yaml`。
+- **全链路自动推导与无感静音过滤**：当服务设为 `enabled: false` 时，Task 调度器与 LLM 提供商管理器自动跳过该服务及关联任务/模型的注册与实例化；包自发现机制（Discovery）自动静音并跳过相关 `.py` 模块导入。
+- **配置解耦与单一控制点重构**：从 `config.yaml` 中移除 `auto_start_services` 冗余数组；从 `llm_config.yaml` 的本地提供商节点中移除重复的 `enabled` 字段，实现本地微服务与远程云端 API (DeepSeek 等) 的明确职责隔离。
+
 ### v20260730
 - **服务控制器 cmd 类型扩展**: `cmd` 类型服务新增 `path` 字段支持，可通过 `cmd /c` 直接启动 `.bat` 批处理文件，保留原有 `command` 字段的 `powershell -Command` 执行方式
 - **ComfyUI 启动路径迁移**: Windows 平台改用 `KamlPro-service/launcher.bat` 替代旧版 `run.ps1`，平台类型由 `ps1` 改为 `cmd`；Linux 平台同步更新为 `KamlPro-service/launcher.sh`

@@ -63,7 +63,13 @@ class TaskScheduler:
         self.task_has_outputs: Dict[str, bool] = {}  # 任务是否有可下载的产出文件
 
         for task_type, task_config in tasks_config.items():
+            if not task_config.get("enabled", True):
+                continue
+
             service_name = task_config.get("service")
+            if service_name and not service_controller.is_enabled(service_name):
+                continue
+
             self.task_service_map[task_type] = service_name
 
             track_mode = task_config.get("track_mode", "poll")

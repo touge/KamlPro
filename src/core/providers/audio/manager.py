@@ -19,7 +19,10 @@ def _discover_audio_providers():
     """
     音频提供商自发现器。
     动态遍历当前文件夹下的所有 py 文件，执行 import 从而触发各类声明的 @register_audio_provider 装饰器。
+    若对应的底层服务在 services.yaml 中配置了 enabled: false，跳过导入。
     """
+    from src.core.service_controller import service_controller
+
     current_dir = os.path.dirname(os.path.abspath(__file__))
     py_files = glob.glob(os.path.join(current_dir, "*.py"))
 
@@ -28,6 +31,10 @@ def _discover_audio_providers():
         module_name = os.path.splitext(basename)[0]
         # 排除抽象基准类、管理器自身
         if module_name in ("__init__", "base", "manager"):
+            continue
+
+        # 检查对应的底层服务（如 index_tts / tts）是否被禁用
+        if service_controller.has_service(module_name) and not service_controller.is_enabled(module_name):
             continue
 
         import_path = f"src.core.providers.audio.{module_name}"

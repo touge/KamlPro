@@ -20,7 +20,10 @@ def _discover_providers():
     """
     大模型提供商自发现器。
     动态遍历当前文件夹下的所有 py 文件，执行 import 从而触发各类声明的 @register_provider 装饰器。
+    若对应的底层服务在 services.yaml 中配置了 enabled: false，跳过导入。
     """
+    from src.core.service_controller import service_controller
+
     current_dir = os.path.dirname(os.path.abspath(__file__))
     py_files = glob.glob(os.path.join(current_dir, "*.py"))
 
@@ -29,6 +32,10 @@ def _discover_providers():
         module_name = os.path.splitext(basename)[0]
         # 排除抽象基准类、管理器自身
         if module_name in ("__init__", "base", "manager"):
+            continue
+
+        # 检查是否关联了被禁用的底层服务（如 ollama）
+        if service_controller.has_service(module_name) and not service_controller.is_enabled(module_name):
             continue
 
         import_path = f"src.core.providers.llm.{module_name}"
@@ -86,6 +93,15 @@ class LLMProviderManager:
             return
 
         for provider_name, provider_config in llm_data.items():
+            # 1. 检查 llm_config.yaml 中显式配置的 enabled: false
+            if not provider_config.get("enabled", True):
+                continue
+
+            # 2. 检查绑定的底层微服务（如 Ollama）在 services.yaml 中是否被禁用
+            from src.core.service_controller import service_controller
+            if service_controller.has_service(provider_name) and not service_controller.is_enabled(provider_name):
+                continue
+
             # 强制要求配置显式 type 字段以防止非预期事故发生
             prov_type = provider_config.get("type") or provider_config.get("provider")
             if not prov_type:
@@ -103,6 +119,8 @@ class LLMProviderManager:
                 # 解析该提供商下所支持的所有大模型列表，并构建高效的 model -> provider 快速检索映射
                 models_list = provider_config.get("models", [])
                 for m in models_list:
+                    if not m.get("enabled", True):
+                        continue
                     model_name = m.get("name")
                     if model_name:
                         self.model_to_provider[model_name] = provider_instance
