@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased] - 2026-08-15
+
+### 🔧 任务列表端点缺陷修复
+
+修复 `GET /interface/tasks` 返回 500 的问题。
+
+- **`task_manager.py`**: 补充缺失的 `list_tasks()` 类方法，返回全部任务状态的深拷贝快照（任务 id → 任务字典映射），与 `/tasks` 列表端点契约对齐。
+- 此前该端点调用不存在的 `TaskManager.list_tasks()`，会抛出 `AttributeError` 导致 FastAPI 兜底 500。
+
+### 📝 下游接入契约文档
+
+- **新增 `docs/下游接入契约.md`**: 系统梳理面向前端 / 下游厂商的协议、通知与状态码全景，涵盖认证、HTTP 信封与状态码、任务状态机、`track_mode` 路由、WS 单任务 / 队列双频道消息类型、流式 NDJSON 协议、取消语义与边界注意事项。
+
+---
+
 ## [Unreleased] - 2026-07-31
 
 ### 🎯 单一信任源 (Single Source of Truth) 服务控制架构

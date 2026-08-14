@@ -80,6 +80,12 @@ class TaskManager:
             return {"status": "not_found", "result": None}
 
     @classmethod
+    def list_tasks(cls) -> Dict[str, Dict[str, Any]]:
+        """返回当前所有任务状态的深拷贝快照，供 /tasks 列表端点使用。"""
+        with cls._lock:
+            return copy.deepcopy(cls._tasks)
+
+    @classmethod
     def update_task(cls, task_id: str, status: str, result: Any = None):
         with cls._lock:
             if task_id in cls._tasks:
