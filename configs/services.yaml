@@ -71,8 +71,8 @@
 # 1. Ollama 服务（跨平台，使用直接 CLI 命令启动）
 # ============================================================================
 Ollama:
-  enabled: false                    # 是否激活 Ollama 服务总开关
-  auto_start: true                # 是否随 Kalm 启动时自动拉起
+  enabled: true                    # 是否激活 Ollama 服务总开关
+  auto_start: false                # 是否随 Kalm 启动时自动拉起
   type: cmd                        # 启动类型：直接 CLI 命令
   command: "ollama serve"          # 启动命令行
   host: "http://127.0.0.1"          # 服务主机
@@ -102,8 +102,8 @@ ComfyUI:
   platforms:
     windows:
       type: cmd
-      path: "D:/AIGC/ComfyUI/KamlPro-service/launcher.bat"
-    
+      # path: "D:/AIGC/ComfyUI/KamlPro-service/launcher.bat"
+      path: "D:/AIGC/ComfyUI/developer-260711/launcher.bat"    
     linux:
       type: sh
       path: "/root/workspace/comfyui/KamlPro-service/launcher.sh"
@@ -134,3 +134,22 @@ TTS:
       path: "/root/workspace/indextts-api/p8001.sh"
       env:
         CUDA_VISIBLE_DEVICES: "0"
+
+# ============================================================================
+# 4. Gemini Web 大模型 API 服务 (Gemini-FastAPI)
+# ============================================================================
+GeminiProxyAPI:
+  enabled: true                    # 服务总开关
+  auto_start: false                 # Kalm 启动时自动预热拉起 Gemini Web 服务
+  host: "http://127.0.0.1"
+  port: 7013                       # Gemini-FastAPI 监听端口
+  ready_keyword: "Application startup complete."  # 就绪标志词
+  manage_lifecycle: true           # 托管生命周期
+  startup_timeout: 60              # 启动就绪超时
+  
+  # 平台特异性覆盖与扩展
+  platforms:
+    windows:
+      type: cmd
+      path: "D:/Apps/Gemini-FastAPI/launcher.bat"
+

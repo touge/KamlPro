@@ -24,10 +24,10 @@ providers:
     models:
       - name: "gemma3:12b"
         tier: "local"
-        display_name: "Gemma 3 (本地离线 / 12B)"
+        display_name: "Gemma 3 (本地 / 12B)"
       - name: "qwen3:14b"
         tier: "local"
-        display_name: "通义千问 3 (本地离线 / 14B)"
+        display_name: "通义千问 3 (本地 / 14B)"
 
   # 🔵 线上 DeepSeek 官方 API (兼容 OpenAI 接口协议)
   # （纯远程 API，开关在此处通过 enabled 字段控制）
@@ -40,11 +40,55 @@ providers:
       - name: "deepseek-v4-flash"
         enabled: true
         tier: "api"
-        display_name: "DeepSeek V4 Flash (极速 / 降本首选)"
+        display_name: "DeepSeek V4 Flash (极速)"
       - name: "deepseek-v4-pro"
         enabled: true
         tier: "api"
-        display_name: "DeepSeek V4 Pro (高保真 / 旗舰思考)"
+        display_name: "DeepSeek V4 Pro (高保真)"
+
+  # 🟣 本地 Gemini Web 服务 (兼容 OpenAI 接口协议，GeminiProxyAPI 监听 7013 端口)
+  gemini:
+    enabled: true                  # 🟢 设为 false 即可禁用此 Gemini API 提供商
+    type: "openai_compatible"
+    base_url: "http://127.0.0.1:7013/v1"
+    api_key: "gemini_local"        # 本地服务填任意非空字符串以规避模拟(Simulated)模式
+    models:
+      - name: "gemini-3-flash"
+        enabled: true
+        tier: "api"
+        display_name: "Gemini 3 Flash (极速)"
+      - name: "gemini-3-pro"
+        enabled: true
+        tier: "api"
+        display_name: "Gemini 3 Pro (高保真)"
+      - name: "gemini-3-flash-thinking"
+        enabled: true
+        tier: "api"
+        display_name: "Gemini 3 Flash Thinking (深度思考)"
+      - name: "gemini-3-flash-plus"
+        enabled: true
+        tier: "api"
+        display_name: "Gemini 3 Flash Plus"
+      - name: "gemini-3-pro-plus"
+        enabled: true
+        tier: "api"
+        display_name: "Gemini 3 Pro Plus"
+      - name: "gemini-3-flash-thinking-plus"
+        enabled: true
+        tier: "api"
+        display_name: "Gemini 3 Flash Thinking Plus"
+      - name: "gemini-3-flash-advanced"
+        enabled: true
+        tier: "api"
+        display_name: "Gemini 3 Flash Advanced"
+      - name: "gemini-3-pro-advanced"
+        enabled: true
+        tier: "api"
+        display_name: "Gemini 3 Pro Advanced"
+      - name: "gemini-3-flash-thinking-advanced"
+        enabled: true
+        tier: "api"
+        display_name: "Gemini 3 Flash Thinking Advanced"
 
 # ============================================================================
 # 全局大模型调度配置
