@@ -15,6 +15,7 @@ from fastapi import APIRouter, WebSocket
 
 from src.core.ws_manager import ws_manager
 from src.logic.logger import log
+from src.logic.yaml_config_loader import yaml_config_loader
 
 router = APIRouter(tags=["Queue Broadcast"])
 
@@ -30,6 +31,8 @@ async def queue_websocket(websocket: WebSocket):
             # 保持连接，等待客户端消息（客户端发 ping，我们回 pong）
             data = await websocket.receive_text()
             if data == "ping":
+                if yaml_config_loader.get("app.debug", False):
+                    log.info(f"[WS Send] [Queue: {ws_id}] pong", extra={"markup": False})
                 await websocket.send_text("pong")
     except Exception:
         pass

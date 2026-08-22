@@ -8,11 +8,13 @@ WebSocket 连接管理器
 """
 
 import asyncio
+import json
 import threading
 from typing import Dict, Optional
 from fastapi import WebSocket
 
 from src.logic.logger import log
+from src.logic.yaml_config_loader import yaml_config_loader
 
 
 class WebSocketManager:
@@ -69,6 +71,8 @@ class WebSocketManager:
 
     async def _send_async(self, task_id: str, ws: WebSocket, message: dict):
         try:
+            if yaml_config_loader.get("app.debug", False):
+                log.info(f"[WS Send] [{task_id}] {json.dumps(message, ensure_ascii=False)}", extra={"markup": False})
             await ws.send_json(message)
             msg_type = message.get("type", "")
             if msg_type in ("task_complete", "task_failed"):
@@ -145,6 +149,8 @@ class WebSocketManager:
 
     async def _send_queue_async(self, ws_id: str, ws: WebSocket, message: dict):
         try:
+            if yaml_config_loader.get("app.debug", False):
+                log.info(f"[WS Broadcast] [{ws_id}] {json.dumps(message, ensure_ascii=False)}", extra={"markup": False})
             await ws.send_json(message)
         except Exception:
             log.warning(f"[WSManager] Failed to broadcast to queue subscriber {ws_id}, disconnecting")

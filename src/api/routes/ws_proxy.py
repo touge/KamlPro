@@ -8,15 +8,23 @@ WebSocket 进度透传端点
 """
 
 import asyncio
+import json
 from fastapi import APIRouter, WebSocket
 
 from src.core.task_manager import TaskManager
 from src.core.ws_manager import ws_manager
 from src.logic.logger import log
+from src.logic.yaml_config_loader import yaml_config_loader
 
 router = APIRouter(tags=["WebSocket"])
 
 POLL_INTERVAL = 2  # 兜底轮询间隔
+
+
+async def _send_ws_json(websocket: WebSocket, task_id: str, message: dict):
+    if yaml_config_loader.get("app.debug", False):
+        log.info(f"[WS Send] [{task_id}] {json.dumps(message, ensure_ascii=False)}", extra={"markup": False})
+    await websocket.send_json(message)
 
 
 @router.websocket("/tasks/{task_id}/ws")
@@ -30,13 +38,13 @@ async def task_websocket(websocket: WebSocket, task_id: str):
     status = task.get("status", "not_found")
 
     if status == "not_found":
-        await websocket.send_json({"type": "error", "message": "Task not found"})
+        await _send_ws_json(websocket, task_id, {"type": "error", "message": "Task not found"})
         await websocket.close()
         ws_manager.unregister(task_id)
         return
 
     if status == TaskManager.STATUS_SUCCESS:
-        await websocket.send_json({
+        await _send_ws_json(websocket, task_id, {
             "type": "task_complete",
             "status": "success",
             "result": task.get("result"),
@@ -46,7 +54,7 @@ async def task_websocket(websocket: WebSocket, task_id: str):
         return
 
     if status == TaskManager.STATUS_FAILED:
-        await websocket.send_json({
+        await _send_ws_json(websocket, task_id, {
             "type": "task_complete",
             "status": "failed",
             "result": task.get("result"),
@@ -66,7 +74,7 @@ async def task_websocket(websocket: WebSocket, task_id: str):
             if current_status in (TaskManager.STATUS_SUCCESS, TaskManager.STATUS_FAILED):
                 msg_type = "task_complete" if current_status == TaskManager.STATUS_SUCCESS else "task_failed"
                 try:
-                    await websocket.send_json({
+                    await _send_ws_json(websocket, task_id, {
                         "type": msg_type,
                         "status": current_status,
                         "result": current.get("result"),

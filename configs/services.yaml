@@ -93,7 +93,7 @@ ComfyUI:
   manage_lifecycle: true           # 托管生命周期
   startup_timeout: 300             # 加载大模型可能较慢，超时设为 300 秒
   free_api:                        # 空闲时调用的显存释放 API
-    path: "/api/free"
+    path: "/free"
     body:
       unload_models: true
       free_memory: true

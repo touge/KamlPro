@@ -1,5 +1,23 @@
 # Changelog
 
+## [Unreleased] - 2026-08-23
+
+### 📡 WebSocket 消息日志输出与调试控制
+
+支持将后端向客户端发送的 WebSocket 消息日志打印到控制台，并统一受 `config.yaml` 中的 `app.debug` 开关控制。
+
+- **`src/core/ws_manager.py`**:
+  - `_send_async`: 推送任务执行进度与完成/失败状态时，当 `app.debug: true` 时在控制台输出 `[WS Send] [task_id] <message>`。
+  - `_send_queue_async`: 广播任务生命周期通知到队列订阅者时，当 `app.debug: true` 时在控制台输出 `[WS Broadcast] [subscriber_id] <message>`。
+- **`src/api/routes/ws_proxy.py`**:
+  - 统一封装 `_send_ws_json`，在任务初始状态直推（如任务已完成/已失败/不存在）及轮询兜底完成时，受 `app.debug` 控制输出发送日志。
+- **`src/api/routes/queue_ws.py`**:
+  - 队列 WebSocket 心跳回复 `pong` 时，受 `app.debug` 控制输出发送日志。
+- **Rich 格式兼容**:
+  - 输出日志时配置 `extra={"markup": False}`，避免 JSON 报文或 task_id 中的特殊符号被 Rich markup 标签误解析。
+
+---
+
 ## [Unreleased] - 2026-08-15
 
 ### 🔧 任务列表端点缺陷修复
