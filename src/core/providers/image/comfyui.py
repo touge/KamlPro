@@ -9,6 +9,7 @@ ComfyUI 图像生成服务提供商实现
 import time
 import urllib.request
 import urllib.parse
+import urllib.error
 import json
 import websocket
 from typing import Dict, Any
@@ -166,10 +167,40 @@ class _ComfyUIClient:
 
     def _queue_prompt(self, prompt: dict, client_id: str) -> str:
         data = json.dumps({"prompt": prompt, "client_id": client_id}).encode("utf-8")
-        req = urllib.request.Request(f"{self.base_url}/prompt", data=data,
-            headers={"Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(req) as resp:
-            return json.loads(resp.read().decode())["prompt_id"]
+        req = urllib.request.Request(
+            f"{self.base_url}/prompt",
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        try:
+            with urllib.request.urlopen(req) as resp:
+                return json.loads(resp.read().decode())["prompt_id"]
+        except urllib.error.HTTPError as e:
+            raw_err = e.read().decode("utf-8", errors="ignore")
+            detailed_msg = raw_err
+            try:
+                err_json = json.loads(raw_err)
+                if "node_errors" in err_json and err_json["node_errors"]:
+                    err_lines = []
+                    for node_id, node_info in err_json["node_errors"].items():
+                        class_type = node_info.get("class_type", "未知节点")
+                        for err in node_info.get("errors", []):
+                            err_lines.append(f"[节点 {node_id} ({class_type})]: {err.get('message', '')} {err.get('details', '')}".strip())
+                    if err_lines:
+                        detailed_msg = " | ".join(err_lines)
+                elif isinstance(err_json.get("error"), dict):
+                    detailed_msg = err_json["error"].get("message") or str(err_json["error"])
+                elif err_json.get("error"):
+                    detailed_msg = str(err_json["error"])
+            except Exception:
+                pass
+
+            log.error(f"[ComfyUI Client] >>> 提交工作流被拒绝 (HTTP 400 Bad Request): {detailed_msg}")
+            raise RuntimeError(f"ComfyUI 校验失败: {detailed_msg}") from e
+        except Exception as e:
+            log.error(f"[ComfyUI Client] >>> 提交 Prompt 发生网络异常: {e}")
+            raise
 
     def _delete_from_queue(self, prompt_id: str):
         log_cancel_debug(f"_delete_from_queue called for prompt_id={prompt_id}")
