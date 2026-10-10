@@ -286,7 +286,32 @@ class TestSingleTrackQueue(unittest.TestCase):
         self.assertIsNotNone(dur)
         self.assertGreaterEqual(dur, 0.0)
 
+    def test_10_single_channel_progress_throttling(self):
+        """测试 10: 单任务旧频道 (ws_manager.send) 的高频 progress/overall_progress 防洪节流"""
+        mock_ws = MagicMock()
+        mock_ws.send_json = AsyncMock()
+        tid = "task_flood_test"
+        ws_manager.register(tid, mock_ws)
+
+        # 连续快速发送 10 条 progress/overall_progress
+        for i in range(10):
+            ws_manager.send(tid, {"type": "progress", "data": {"value": i, "max": 100}})
+            ws_manager.send(tid, {"type": "overall_progress", "data": {"percent": i}})
+
+        self.loop.run_until_complete(asyncio.sleep(0.01))
+        # 300ms 内，progress 和 overall_progress 各自只能放行第 1 次，其余 18 条全部被平滑拦截！
+        self.assertEqual(mock_ws.send_json.call_count, 2)
+
+        # 当终态 100% 到达时，立即强制放行
+        ws_manager.send(tid, {"type": "overall_progress", "data": {"percent": 100}})
+        self.loop.run_until_complete(asyncio.sleep(0.01))
+        self.assertEqual(mock_ws.send_json.call_count, 3)
+
+        ws_manager.clear_task_progress(tid)
+        ws_manager.unregister(tid)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

@@ -64,10 +64,26 @@ class WebSocketManager:
             return event
         return asyncio.Event()
 
-    def send(self, task_id: str, message: dict):
-        """从同步线程推送消息到前端 WS。"""
+    def send(self, task_id: str, message: dict, throttle_interval: Optional[float] = None):
+        """从同步线程推送消息到前端 WS。对 progress / overall_progress 默认应用 300ms 智能平滑节流。"""
         if not self._loop:
             return
+
+        # 智能平滑节流：对单任务频道的 progress/overall_progress 高频消息进行 300ms 防洪拦截
+        msg_type = message.get("type", "")
+        if msg_type in ("progress", "overall_progress"):
+            interval = throttle_interval if throttle_interval is not None else 0.3
+            data = message.get("data", {})
+            percent = data.get("percent") if isinstance(data, dict) else message.get("percent")
+            is_finished = (percent == 100) or (msg_type in ("task_complete", "task_failed"))
+
+            now = time.time()
+            cache_key = f"single_{task_id}_{msg_type}"
+            last_time = self._last_progress_time.get(cache_key, 0.0)
+            if not is_finished and (now - last_time < interval):
+                return  # 300ms 窗口内平滑丢弃，杜绝狂暴刷屏！
+            self._last_progress_time[cache_key] = now
+
         with self._lock:
             ws = self._connections.get(task_id)
         if ws:
@@ -217,6 +233,8 @@ class WebSocketManager:
     def clear_task_progress(self, task_id: str):
         """任务结束时清理节流时间记录"""
         self._last_progress_time.pop(task_id, None)
+        self._last_progress_time.pop(f"single_{task_id}_progress", None)
+        self._last_progress_time.pop(f"single_{task_id}_overall_progress", None)
 
     async def _send_queue_async(self, ws_id: str, ws: WebSocket, message: dict):
         try:
