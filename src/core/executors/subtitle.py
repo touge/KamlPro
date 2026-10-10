@@ -33,9 +33,25 @@ def execute(task_id: str, **payload):
         provider = audio_provider_manager.get_provider(provider_type)
 
         def progress_callback(status_data: dict):
-            """将字幕对齐实时进度消息透传到 TaskManager 和前端 WS"""
+            """将字幕对齐实时进度消息透传到 TaskManager 和前端 WS (双轨兼容与单轨节流)"""
             TaskManager.update_task(task_id, TaskManager.STATUS_RUNNING, result=status_data)
             ws_manager.send(task_id, status_data)
+
+            client_id = payload.get("client_id")
+            progress_val = status_data.get("progress")
+            if progress_val is not None:
+                ws_manager.emit_progress_throttled(
+                    task_id=task_id,
+                    client_id=client_id,
+                    message={
+                        "type": "task_progress",
+                        "task_id": task_id,
+                        "client_id": client_id,
+                        "progress": progress_val,
+                        "message": status_data.get("message", f"字幕处理中 ({progress_val}%)"),
+                    },
+                    interval=0.3
+                )
 
         log.info(f"[Subtitle Executor] >>> task_id={task_id} 委托给提供商 '{provider_type}' 执行字幕对齐...")
         status_data = provider.align_subtitle(payload, progress_callback)

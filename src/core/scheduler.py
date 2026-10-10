@@ -120,7 +120,7 @@ class TaskScheduler:
         log.info(f"[Scheduler] Worker thread started. Idle timeout: {self.idle_timeout}s")
 
     def submit_task(self, task_type: str, task_id: str, payload: Dict[str, Any],
-                    output_queue=None, started_event=None) -> bool:
+                    output_queue=None, started_event=None, client_id: Optional[str] = None) -> bool:
         """
         统一提交任务入口。支持双轨分流：
         - 本地 GPU 任务：进入原本的 FIFO 串行队列。
@@ -153,14 +153,26 @@ class TaskScheduler:
                 }
 
         if is_cloud_task:
-            log.info(f"[Scheduler] >>> submit_task (云端 API): {task_id} ({task_type}), model={model_name}")
+            log.info(f"[Scheduler] >>> submit_task (云端 API): {task_id} ({task_type}), model={model_name}, client_id={client_id}")
             
             with self.api_lock:
                 can_stream = self.active_cloud_tasks < self.max_concurrent_api_tasks
             
+            # 广播入队通知（云端并发无本地队列顺位排队，position=0）
+            ws_manager.emit_to_target_or_broadcast(client_id, {
+                "type": "task_enqueued",
+                "task_id": task_id,
+                "task_type": task_type,
+                "client_id": client_id,
+                "track_mode": track_mode,
+                "queue_position": 0,
+                "total_queued": self.task_queue.qsize(),
+                "message": "云端 API 任务已提交，准备执行",
+            })
+
             # 提交到 ThreadPoolExecutor 线程池运行！
             self.api_executor.submit(
-                self._run_cloud_task, task_type, task_id, payload, output_queue, started_event
+                self._run_cloud_task, task_type, task_id, payload, output_queue, started_event, client_id
             )
             
             log.info(f"[Scheduler] Cloud task {task_id} submitted. can_stream_immediately={can_stream}")
@@ -175,39 +187,47 @@ class TaskScheduler:
         task_item = {
             "type": task_type, "id": task_id, "payload": payload,
             "output_queue": output_queue, "started_event": started_event,
-            "track_mode": track_mode,
+            "track_mode": track_mode, "client_id": client_id,
         }
         self.task_queue.put(task_item)
-        log.info(f"[Scheduler] >>> submit_task 已入队: {task_id} ({task_type}), 新队列大小={self.task_queue.qsize()}")
-        log.info(f"[Scheduler] Task {task_id} ({task_type}) enqueued. Queue size: {self.task_queue.qsize()}")
+        q_size = self.task_queue.qsize()
+        log.info(f"[Scheduler] >>> submit_task 已入队: {task_id} ({task_type}), 新队列大小={q_size}")
+        log.info(f"[Scheduler] Task {task_id} ({task_type}) enqueued. Queue size: {q_size}")
         
-        # 广播入队通知
-        ws_manager.broadcast_queue({
+        # 广播入队通知（携带当前在队列中的排位）
+        ws_manager.emit_to_target_or_broadcast(client_id, {
             "type": "task_enqueued",
             "task_id": task_id,
             "task_type": task_type,
+            "client_id": client_id,
             "track_mode": track_mode,
+            "queue_position": q_size,
+            "total_queued": q_size,
+            "message": f"任务已排入队列，前方排队 {q_size - 1} 人" if q_size > 1 else "任务已排入队列，即将出队执行",
         })
         return can_stream
 
     def _run_cloud_task(self, task_type: str, task_id: str, payload: Dict[str, Any],
-                        output_queue, started_event):
+                        output_queue, started_event, client_id: Optional[str] = None):
         """
         云端 API 并发执行线程。
         """
         track_mode = self.task_track_modes.get(task_type, "poll")
         
         # 检查是否需要更新为 STATUS_RUNNING。
-        # 如果是闲时即时流，状态早已在 API 路由层被更新为 RUNNING。
-        # 如果是忙时排队，当前任务仍为 QUEUED，线程被调度执行时代表“轮到它了”，我们需要将它变更为 RUNNING，并向 WS 广播“活来了！”
         task_info = TaskManager.get_task(task_id)
         if task_info and task_info.get("status") == TaskManager.STATUS_FAILED:
             log.info(f"[Scheduler] Cloud task {task_id} was cancelled before starting. Skipping.")
             if output_queue is not None:
                 output_queue.put(None)
-            ws_manager.broadcast_queue({
+            ws_manager.clear_task_progress(task_id)
+            ws_manager.emit_to_target_or_broadcast(client_id, {
                 "type": "task_completed",
                 "task_id": task_id,
+                "task_type": task_type,
+                "client_id": client_id,
+                "status": TaskManager.STATUS_FAILED,
+                "result": task_info.get("result", {}),
                 "next_task_id": None,
                 "next_task_type": None,
                 "next_track_mode": None,
@@ -216,7 +236,6 @@ class TaskScheduler:
 
         if task_info and task_info.get("status") == TaskManager.STATUS_QUEUED:
             TaskManager.update_task(task_id, TaskManager.STATUS_RUNNING, {"message": "Cloud task out of queue, starting..."})
-            # 向前端 WS 管道广播：任务正在执行（前端收到此消息即可瞬间触发 GET /stream 连接！）
             ws_manager.send(task_id, {
                 "type": "task_running",
                 "status": TaskManager.STATUS_RUNNING,
@@ -227,12 +246,14 @@ class TaskScheduler:
             self.active_cloud_tasks += 1
             log.info(f"[Scheduler] Cloud API task {task_id} executing. Active: {self.active_cloud_tasks}/{self.max_concurrent_api_tasks}")
 
-        # 广播全局队列任务启动通知
-        ws_manager.broadcast_queue({
+        # 广播单轨任务启动通知
+        ws_manager.emit_to_target_or_broadcast(client_id, {
             "type": "task_started",
             "task_id": task_id,
             "task_type": task_type,
+            "client_id": client_id,
             "track_mode": track_mode,
+            "message": "云端 API 任务开始执行",
         })
 
         try:
@@ -242,7 +263,6 @@ class TaskScheduler:
             if executor:
                 log.info(f"[Scheduler] >>> 开始执行云端任务: {task_id} ({task_type}), executor={executor.__module__}.{executor.__name__}")
                 if output_queue is not None:
-                    # 云端流式执行器，支持开始事件同步
                     executor(task_id, output_queue, started_event, **payload)
                 else:
                     executor(task_id, **payload)
@@ -269,13 +289,20 @@ class TaskScheduler:
                 self.stream_events.pop(task_id, None)
                 log.info(f"[Scheduler] Cloud API task {task_id} completed. Active: {self.active_cloud_tasks}/{self.max_concurrent_api_tasks}")
             
-            # 广播全局队列任务完成通知
-            ws_manager.broadcast_queue({
+            # 清理节流并广播单轨任务完成通知（携带最新终态与产物）
+            ws_manager.clear_task_progress(task_id)
+            final_task_info = TaskManager.get_task(task_id)
+            ws_manager.emit_to_target_or_broadcast(client_id, {
                 "type": "task_completed",
                 "task_id": task_id,
+                "task_type": task_type,
+                "client_id": client_id,
+                "status": final_task_info.get("status", "success"),
+                "result": final_task_info.get("result", {}),
                 "next_task_id": None,
                 "next_task_type": None,
                 "next_track_mode": None,
+                "message": "云端 API 任务已完成",
             })
 
     def _scheduler_loop(self):
@@ -297,6 +324,7 @@ class TaskScheduler:
 
                 task_type = task["type"]
                 task_id = task["id"]
+                client_id = task.get("client_id")
                 payload = task["payload"]
                 output_queue = task.get("output_queue")
                 started_event = task.get("started_event")
@@ -315,6 +343,10 @@ class TaskScheduler:
                         next_info = {
                             "type": "task_completed",
                             "task_id": task_id,
+                            "task_type": task_type,
+                            "client_id": client_id,
+                            "status": TaskManager.STATUS_FAILED,
+                            "result": task_info.get("result", {}),
                             "next_task_id": None,
                             "next_task_type": None,
                             "next_track_mode": None,
@@ -324,7 +356,8 @@ class TaskScheduler:
                             next_info["next_task_id"] = peek["id"]
                             next_info["next_task_type"] = next_type
                             next_info["next_track_mode"] = peek.get("track_mode", self.task_track_modes.get(next_type, "poll"))
-                        ws_manager.broadcast_queue(next_info)
+                        ws_manager.clear_task_progress(task_id)
+                        ws_manager.emit_to_target_or_broadcast(client_id, next_info)
                         continue
 
                     # 如果任务还在排队状态，出队时变更为 RUNNING，并向 WS 广播 task_running 起跑信号
@@ -340,13 +373,15 @@ class TaskScheduler:
                     if started_event:
                         started_event.set()
 
-                    # 广播任务开始
+                    # 广播任务开始（带 client_id 定向推送）
                     track_mode = task.get("track_mode", self.task_track_modes.get(task_type, "poll"))
-                    ws_manager.broadcast_queue({
+                    ws_manager.emit_to_target_or_broadcast(client_id, {
                         "type": "task_started",
                         "task_id": task_id,
                         "task_type": task_type,
+                        "client_id": client_id,
                         "track_mode": track_mode,
+                        "message": "本地 GPU 任务开始执行",
                     })
 
                     # 服务管理：大模型任务根据模型动态获取物理微服务名（如 "Ollama"），其他任务从配置表映射
@@ -372,21 +407,28 @@ class TaskScheduler:
                 finally:
                     self.is_local_busy = False
 
-                # 广播任务完成（含下一任务信息）
+                # 广播任务完成（含下一任务信息与结果详情，带 client_id 定向推送）
+                ws_manager.clear_task_progress(task_id)
+                task_info = TaskManager.get_task(task_id)
                 next_type = self._peek_next_task_type()
                 next_info = {
                     "type": "task_completed",
                     "task_id": task_id,
+                    "task_type": task_type,
+                    "client_id": client_id,
+                    "status": task_info.get("status", "success"),
+                    "result": task_info.get("result", {}),
                     "next_task_id": None,
                     "next_task_type": None,
                     "next_track_mode": None,
+                    "message": "本地 GPU 任务执行完成",
                 }
                 if next_type:
                     peek = self.task_queue.queue[0]
                     next_info["next_task_id"] = peek["id"]
                     next_info["next_task_type"] = next_type
                     next_info["next_track_mode"] = peek.get("track_mode", self.task_track_modes.get(next_type, "poll"))
-                ws_manager.broadcast_queue(next_info)
+                ws_manager.emit_to_target_or_broadcast(client_id, next_info)
 
                 # 标记产出并等待客户端下载完成，才处理下一个任务
                 # auto_start 常驻服务无需等待下载，服务不会关闭
@@ -563,6 +605,30 @@ class TaskScheduler:
         if self.current_service_name:
             self._stop_current_service()
         log.info("[Scheduler] Shutdown complete.")
+
+    def get_queue_status(self, client_id: Optional[str] = None) -> Dict[str, Any]:
+        """返回当前调度器队列的快照信息。若提供 client_id 则仅筛选归属于该客户端的排队任务。"""
+        with self.api_lock:
+            total_queued = self.task_queue.qsize()
+            is_busy = self.is_local_busy or (self.active_cloud_tasks > 0)
+            queued_items = []
+            for idx, item in enumerate(list(self.task_queue.queue), 1):
+                item_cid = item.get("client_id")
+                if client_id and item_cid != client_id:
+                    continue
+                queued_items.append({
+                    "position": idx,
+                    "task_id": item.get("id"),
+                    "task_type": item.get("type"),
+                    "client_id": item_cid,
+                })
+            return {
+                "total_queued": total_queued,
+                "is_busy": is_busy,
+                "current_running_service": self.current_service_name,
+                "active_cloud_tasks": self.active_cloud_tasks,
+                "queue_list": queued_items,
+            }
 
 
 scheduler = TaskScheduler()

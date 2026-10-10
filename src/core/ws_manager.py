@@ -10,7 +10,9 @@ WebSocket 连接管理器
 import asyncio
 import json
 import threading
-from typing import Dict, Optional
+import time
+from collections import defaultdict
+from typing import Dict, Set, Optional
 from fastapi import WebSocket
 
 from src.logic.logger import log
@@ -34,7 +36,10 @@ class WebSocketManager:
             return
         self._connections: Dict[str, WebSocket] = {}
         self._events: Dict[str, asyncio.Event] = {}
-        self._queue_subscribers: Dict[str, WebSocket] = {}  # 队列广播订阅者
+        self._queue_subscribers: Dict[str, WebSocket] = {}  # 队列广播订阅者 (ws_id -> WebSocket)
+        self._subscriber_clients: Dict[str, str] = {}       # ws_id -> client_id 反查字典
+        self._client_subscribers: Dict[str, Set[str]] = defaultdict(set)  # client_id -> Set[ws_id]
+        self._last_progress_time: Dict[str, float] = {}     # task_id -> 上次推送进度的 timestamp
         self._lock = threading.Lock()
         self._queue_lock = threading.Lock()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -112,20 +117,30 @@ class WebSocketManager:
             self.unsubscribe_queue(sub_id)
 
     # =========================================================================
-    # 队列广播（全局通知频道）
+    # 队列广播与单轨定向推送（全局/多租户通知频道）
     # =========================================================================
 
-    def subscribe_queue(self, ws_id: str, websocket: WebSocket):
-        """订阅队列广播。ws_id 为连接标识，用于取消订阅。"""
+    def subscribe_queue(self, ws_id: str, websocket: WebSocket, client_id: Optional[str] = None):
+        """订阅队列广播。ws_id 为连接标识，client_id 为可选的业务客户端身份。"""
         with self._queue_lock:
             self._queue_subscribers[ws_id] = websocket
-        log.info(f"[WSManager] Queue subscriber '{ws_id}' connected ({len(self._queue_subscribers)} total)")
+            if client_id:
+                self._subscriber_clients[ws_id] = client_id
+                self._client_subscribers[client_id].add(ws_id)
+        cid_info = f", client_id='{client_id}'" if client_id else ""
+        log.info(f"[WSManager] Queue subscriber '{ws_id}' connected{cid_info} ({len(self._queue_subscribers)} total)")
 
     def unsubscribe_queue(self, ws_id: str):
-        """取消队列广播订阅。"""
+        """取消队列广播订阅并清理 client_id 索引。"""
         ws = None
         with self._queue_lock:
             ws = self._queue_subscribers.pop(ws_id, None)
+            client_id = self._subscriber_clients.pop(ws_id, None)
+            if client_id and client_id in self._client_subscribers:
+                self._client_subscribers[client_id].discard(ws_id)
+                if not self._client_subscribers[client_id]:
+                    del self._client_subscribers[client_id]
+
         if ws and self._loop:
             asyncio.run_coroutine_threadsafe(self._close_queue_ws(ws_id, ws), self._loop)
 
@@ -135,17 +150,51 @@ class WebSocketManager:
         except Exception:
             pass
 
+    def send_to_client(self, client_id: str, message: dict):
+        """定向推送：仅向特定 client_id 的所有活动 WS 连接发送消息。"""
+        if not self._loop or not client_id:
+            return
+        with self._queue_lock:
+            ws_ids = list(self._client_subscribers.get(client_id, set()))
+            target_sockets = [(ws_id, self._queue_subscribers[ws_id]) for ws_id in ws_ids if ws_id in self._queue_subscribers]
+        
+        for ws_id, ws in target_sockets:
+            asyncio.run_coroutine_threadsafe(
+                self._send_queue_async(ws_id, ws, message), self._loop
+            )
+
     def broadcast_queue(self, message: dict):
-        """从同步线程向所有队列订阅者广播消息。"""
+        """向所有队列订阅者全网广播消息（兼容公共/大盘广播）。"""
         if not self._loop:
             return
-        # 快照订阅者列表（锁内），发送在锁外，避免阻塞
         with self._queue_lock:
             snapshot = list(self._queue_subscribers.items())
         for ws_id, ws in snapshot:
             asyncio.run_coroutine_threadsafe(
                 self._send_queue_async(ws_id, ws, message), self._loop
             )
+
+    def emit_to_target_or_broadcast(self, target_client_id: Optional[str], message: dict):
+        """智能路由：若指定了 target_client_id 则定向发送；若未指定则退化为全网广播。"""
+        if target_client_id:
+            self.send_to_client(target_client_id, message)
+        else:
+            self.broadcast_queue(message)
+
+    def emit_progress_throttled(self, task_id: str, client_id: Optional[str], message: dict, interval: float = 0.3):
+        """单轨进度节流推送：对 ComfyUI 等高频进度以 interval(默认300ms) 为窗口合并下发。"""
+        now = time.time()
+        last_time = self._last_progress_time.get(task_id, 0.0)
+        progress = message.get("progress", 0)
+        
+        # 满足时间间隔或进度到达 100% 终态时触发推送
+        if (now - last_time >= interval) or (progress >= 100):
+            self._last_progress_time[task_id] = now
+            self.emit_to_target_or_broadcast(client_id, message)
+
+    def clear_task_progress(self, task_id: str):
+        """任务结束时清理节流时间记录"""
+        self._last_progress_time.pop(task_id, None)
 
     async def _send_queue_async(self, ws_id: str, ws: WebSocket, message: dict):
         try:

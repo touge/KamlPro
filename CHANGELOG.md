@@ -1,5 +1,31 @@
 # Changelog
 
+## [Unreleased] - 2026-10-10
+
+### 🚀 全局单轨 WebSocket 架构与队列大盘感知机制
+
+彻底收敛任务状态追踪为“单轨机制”，解决双轨 WS 连接泄露与状态打架痛点，提供 100% 向下兼容的商业级单轨体验。
+
+- **`src/core/ws_manager.py`**:
+  - 连接池升级：支持 `client_id` 分组索引，多端隔离，定向投递 (`send_to_client`)。
+  - 智能节流器：新增 `emit_progress_throttled`，以 300ms 为窗口平滑聚合高频采样步数。
+  - 路由兼容：新增 `emit_to_target_or_broadcast`，有 client_id 定向推送，无 client_id 全网广播。
+- **`src/core/task_manager.py`**:
+  - `create_task`: 支持绑定可选的 `client_id`。
+  - `list_tasks`: 支持按 `client_id` 过滤专属任务列表。
+- **`src/core/scheduler.py`**:
+  - 出入队事件携带 `queue_position` 与 `total_queued`，向目标客户端精准推送。
+  - 新增 `get_queue_status(client_id)` 调度队列大盘快照方法。
+- **`src/core/executors/` (`image.py`, `tts.py`, `subtitle.py`)**:
+  - 执行器进度回调统一接入 `ws_manager.emit_progress_throttled`，平滑透传单轨进度。
+- **`src/api/routes/` (`tasks.py`, `queue_ws.py`)**:
+  - `POST /tasks/submit`: 自动解析 `client_id`（支持 JSON/表单/Header），响应体回显 client_id。
+  - `GET /interface/queue/status`: 新增全局调度队列水位大盘 HTTP 查询接口。
+  - `GET /interface/tasks`: 支持 `?client_id=xxx` 参数过滤。
+  - `WS /interface/queue/ws`: 支持 `?client_id=xxx` 订阅，并在握手建立时主动下发第 1 帧 `queue_snapshot`。
+
+---
+
 ## [Unreleased] - 2026-08-23
 
 ### 📡 WebSocket 消息日志输出与调试控制

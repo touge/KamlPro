@@ -8,9 +8,9 @@ GET  /tasks/{id}/status — 查询任务状态
 
 import json
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Query
 
 from src.core.response import success, error
 from src.core.task_manager import TaskManager
@@ -26,7 +26,7 @@ TYPE_ALIASES = {}
 
 @router.post("/tasks/submit")
 async def submit_task(request: Request):
-    """统一任务提交。支持 JSON 和 multipart/form-data 两种请求格式。"""
+    """统一任务提交。支持 JSON 和 multipart/form-data 两种请求格式，支持可选的 client_id。"""
     content_type = request.headers.get("content-type", "")
 
     # ---- multipart/form-data（文件上传类任务，如 subtitle）----
@@ -36,12 +36,14 @@ async def submit_task(request: Request):
         if not task_type:
             return error("Missing 'task_type' in form data", 400)
 
+        client_id = form.get("client_id") or request.headers.get("x-client-id")
+
         # 收集所有非文件字段为 payload
         payload: Dict[str, Any] = {}
         saved_files: Dict[str, str] = {}  # field_name → local_path
 
         for field_name, value in form.items():
-            if field_name == "task_type":
+            if field_name in ("task_type", "client_id"):
                 continue
             if hasattr(value, "filename"):
                 # 文件字段：保存到任务目录
@@ -56,7 +58,8 @@ async def submit_task(request: Request):
             else:
                 payload[field_name] = value
 
-        task_id = TaskManager.create_task(task_type)
+        payload["client_id"] = client_id
+        task_id = TaskManager.create_task(task_type, client_id=client_id)
 
         # 将上传文件保存到任务目录
         task_dir = TASK_FOLDER / task_id
@@ -76,12 +79,14 @@ async def submit_task(request: Request):
 
         task_type = body.get("task_type", "")
         payload = body.get("payload", {})
-        log.info(f"[API] 客户端原始请求: task_type='{task_type}', payload keys={list(payload.keys())}")
+        client_id = body.get("client_id") or payload.get("client_id") or request.headers.get("x-client-id")
+        payload["client_id"] = client_id
+        log.info(f"[API] 客户端原始请求: task_type='{task_type}', client_id='{client_id}', payload keys={list(payload.keys())}")
 
         if not task_type:
             return error("Missing 'task_type' in request body", 400)
 
-        task_id = TaskManager.create_task(task_type)
+        task_id = TaskManager.create_task(task_type, client_id=client_id)
 
     # ---- 提交到调度器 ----
     internal_type = TYPE_ALIASES.get(task_type, task_type)
@@ -90,8 +95,8 @@ async def submit_task(request: Request):
         return error(f"Unknown task type: '{task_type}'. Known types: {known_types}", 400)
 
     try:
-        log.info(f"[API] >>> submit_task 调用前: type={internal_type}, task_id={task_id}")
-        can_stream_immediately = scheduler.submit_task(internal_type, task_id, payload)
+        log.info(f"[API] >>> submit_task 调用前: type={internal_type}, task_id={task_id}, client_id={client_id}")
+        can_stream_immediately = scheduler.submit_task(internal_type, task_id, payload, client_id=client_id)
         log.info(f"[API] >>> submit_task 返回后: type={internal_type}, task_id={task_id}, can_stream={can_stream_immediately}")
         
         # 闲时直连则直接变更为 RUNNING，否则进入 QUEUED 状态排队
@@ -109,6 +114,7 @@ async def submit_task(request: Request):
 
         response_data = {
             "task_id": task_id,
+            "client_id": client_id,
             "status": TaskManager.STATUS_RUNNING if can_stream_immediately else TaskManager.STATUS_QUEUED,
             "track_mode": track_mode,
             "hint": hint,
@@ -134,9 +140,16 @@ def _track_hint(mode: str, task_id: str) -> str:
 
 
 @router.get("/tasks")
-async def list_tasks():
-    """返回当前所有活跃任务状态。前端轮询这一个端点即可。"""
-    return success(data={"tasks": TaskManager.list_tasks()})
+async def list_tasks(client_id: Optional[str] = Query(None)):
+    """返回当前所有活跃任务状态。支持传 client_id 进行专属客户端任务过滤。"""
+    return success(data={"tasks": TaskManager.list_tasks(client_id=client_id)})
+
+
+@router.get("/queue/status")
+async def get_queue_status(client_id: Optional[str] = Query(None)):
+    """查询全局调度队列水位与大盘状态。支持按 client_id 筛选属于该客户端的任务列表。"""
+    queue_data = scheduler.get_queue_status(client_id=client_id)
+    return success(data=queue_data)
 
 
 @router.get("/tasks/{task_id}/status")

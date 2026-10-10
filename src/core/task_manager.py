@@ -60,12 +60,13 @@ class TaskManager:
     DEFAULT_TTL_SECONDS = 3600  # 任务结果默认保留 1 小时
 
     @classmethod
-    def create_task(cls, task_type: str) -> str:
+    def create_task(cls, task_type: str, client_id: Optional[str] = None) -> str:
         task_id = str(uuid.uuid4())
         with cls._lock:
             cls._tasks[task_id] = {
                 "status": cls.STATUS_PENDING,
                 "task_type": task_type,
+                "client_id": client_id,
                 "result": {},
                 "created_at": time.time(),
             }
@@ -80,10 +81,16 @@ class TaskManager:
             return {"status": "not_found", "result": None}
 
     @classmethod
-    def list_tasks(cls) -> Dict[str, Dict[str, Any]]:
-        """返回当前所有任务状态的深拷贝快照，供 /tasks 列表端点使用。"""
+    def list_tasks(cls, client_id: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
+        """返回任务状态的深拷贝快照。若提供 client_id 则仅返回归属于该客户端的任务。"""
         with cls._lock:
-            return copy.deepcopy(cls._tasks)
+            if not client_id:
+                return copy.deepcopy(cls._tasks)
+            filtered = {
+                tid: task for tid, task in cls._tasks.items()
+                if task.get("client_id") == client_id
+            }
+            return copy.deepcopy(filtered)
 
     @classmethod
     def update_task(cls, task_id: str, status: str, result: Any = None):

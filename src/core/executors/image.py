@@ -32,9 +32,31 @@ def execute(task_id: str, **payload):
         provider = image_provider_manager.get_provider(provider_type)
 
         def progress_callback(raw_message: dict):
-            """将生图实时进度消息透传到 TaskManager 和前端 WS"""
+            """将生图实时进度消息透传到 TaskManager 和前端 WS (双轨兼容与单轨节流)"""
             TaskManager.update_task(task_id, TaskManager.STATUS_RUNNING, result=raw_message)
             ws_manager.send(task_id, raw_message)
+
+            client_id = payload.get("client_id")
+            progress_val = raw_message.get("overall_progress")
+            if progress_val is None:
+                step = raw_message.get("step")
+                max_step = raw_message.get("max_step")
+                if step is not None and max_step:
+                    progress_val = int((step / max_step) * 100)
+            if progress_val is not None:
+                ws_manager.emit_progress_throttled(
+                    task_id=task_id,
+                    client_id=client_id,
+                    message={
+                        "type": "task_progress",
+                        "task_id": task_id,
+                        "client_id": client_id,
+                        "progress": progress_val,
+                        "node_name": raw_message.get("node_title") or raw_message.get("node"),
+                        "message": f"正在生成中 ({progress_val}%)",
+                    },
+                    interval=0.3
+                )
 
         log.info(f"[Image Executor] >>> task_id={task_id} 委托给提供商 '{provider_type}' 执行生图...")
         final_outputs = provider.generate_image(payload, progress_callback)
