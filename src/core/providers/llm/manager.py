@@ -75,6 +75,8 @@ class LLMProviderManager:
             
         self.providers: Dict[str, BaseLLMProvider] = {}
         self.model_to_provider: Dict[str, BaseLLMProvider] = {}
+        self.model_to_tier: Dict[str, str] = {}
+        self.model_to_modalities: Dict[str, list] = {}
         self.reload()
         self._initialized = True
 
@@ -82,6 +84,8 @@ class LLMProviderManager:
         """重新加载配置文件并重新初始化所有大模型提供商"""
         self.providers.clear()
         self.model_to_provider.clear()
+        self.model_to_tier.clear()
+        self.model_to_modalities.clear()
 
         # 触发包自发现机制，动态加载所有 Provider 插件
         _discover_providers()
@@ -109,14 +113,20 @@ class LLMProviderManager:
                 log.critical(error_msg)
                 raise RuntimeError(error_msg)
 
+            # Provider 级别默认 tier 与 modalities（优先配置段中的定义，缺省为 api / ['text']）
+            prov_tier = provider_config.get("tier", "api")
+            prov_modalities = provider_config.get("modalities", ["text"])
+            if isinstance(prov_modalities, str):
+                prov_modalities = [prov_modalities]
+
             provider_class = LLMProviderFactory.get_class(prov_type)
             try:
                 # 实例化对应的 Provider 插件并保存
                 provider_instance = provider_class(provider_name, provider_config)
                 self.providers[provider_name] = provider_instance
-                log.info(f"[LLM Manager] Instantiated provider '{provider_name}' of type '{prov_type}'")
+                log.info(f"[LLM Manager] Instantiated provider '{provider_name}' of type '{prov_type}' (tier={prov_tier})")
 
-                # 解析该提供商下所支持的所有大模型列表，并构建高效的 model -> provider 快速检索映射
+                # 解析该提供商下所支持的所有大模型列表，并构建高效快速检索映射
                 models_list = provider_config.get("models", [])
                 for m in models_list:
                     if not m.get("enabled", True):
@@ -124,7 +134,18 @@ class LLMProviderManager:
                     model_name = m.get("name")
                     if model_name:
                         self.model_to_provider[model_name] = provider_instance
-                        log.info(f"  -> Model '{model_name}' mapped to '{provider_name}'")
+                        # 模型优先使用自身显式指定的 tier，未指定时继承 Provider 的 tier
+                        model_tier = m.get("tier") or prov_tier
+                        self.model_to_tier[model_name] = model_tier
+
+                        # 模型模态解析（支持 text, vision, audio 等）
+                        raw_mods = m.get("modalities") or prov_modalities
+                        if isinstance(raw_mods, str):
+                            raw_mods = [raw_mods]
+                        cleaned_mods = [str(x).lower().strip() for x in raw_mods]
+                        self.model_to_modalities[model_name] = cleaned_mods
+
+                        log.info(f"  -> Model '{model_name}' mapped to '{provider_name}' (tier={model_tier}, modalities={cleaned_mods})")
             except Exception as e:
                 log.error(f"[LLM Manager] Failed to load provider '{provider_name}': {e}", exc_info=True)
 
@@ -146,5 +167,58 @@ class LLMProviderManager:
         # 彻底 Fail-fast
         raise KeyError(f"No provider found for model '{model_name}', and no fallback 'ollama' provider is available.")
 
+    def get_model_tier(self, model_name: str) -> str:
+        """
+        获取大模型的调度层级 tier:
+        - "local": 本地 GPU 串行队列 (FIFO, 显卡算力独占)
+        - "api": 云端 API 并发队列 (线程池, 并发受限)
+        """
+        tier = self.model_to_tier.get(model_name)
+        if tier:
+            return tier
+        try:
+            prov = self.get_provider_for_model(model_name)
+            return prov.config.get("tier", "api")
+        except Exception:
+            return "api"
+
+    def get_service_name_for_model(self, model_name: str) -> str | None:
+        """
+        获取该模型关联的物理微服务名称（如 "Ollama"）。
+        约定：type == "ollama" 对应微服务 "Ollama"；云端 API 模型对应 None。
+        """
+        try:
+            prov = self.get_provider_for_model(model_name)
+            prov_type = prov.config.get("type") or prov.config.get("provider", "")
+            if prov_type == "ollama":
+                return prov.config.get("service_name", "Ollama")
+            return None
+        except Exception:
+            return None
+
+    def get_model_modalities(self, model_name: str) -> list[str]:
+        """
+        获取大模型支持的模态列表，例如 ['text', 'vision']。
+        若模型未显式配置，缺省返回 ['text']。
+        """
+        if model_name in self.model_to_modalities:
+            return self.model_to_modalities[model_name]
+        try:
+            prov = self.get_provider_for_model(model_name)
+            prov_mods = prov.config.get("modalities", ["text"])
+            if isinstance(prov_mods, str):
+                prov_mods = [prov_mods]
+            return [str(x).lower().strip() for x in prov_mods]
+        except Exception:
+            return ["text"]
+
+    def supports_modality(self, model_name: str, modality: str) -> bool:
+        """
+        检查指定模型是否支持特定模态（如 'vision', 'text', 'audio'）。
+        """
+        mods = self.get_model_modalities(model_name)
+        return modality.lower().strip() in mods
+
 
 llm_provider_manager = LLMProviderManager()
+

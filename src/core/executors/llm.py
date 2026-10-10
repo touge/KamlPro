@@ -14,7 +14,27 @@ from typing import Dict, Any
 from src.core.providers.llm.manager import llm_provider_manager
 from src.core.task_manager import TaskManager
 from src.core.ws_manager import ws_manager
+from src.core.utils.media_loader import normalize_images
 from src.logic.logger import log
+
+
+def _process_multimodal_images(model: str, payload: dict, options: dict) -> None:
+    """提取、校验并归一化多模态图片输入"""
+    images = payload.get("images") or options.get("images")
+    if not images:
+        return
+
+    # 防呆拦截：校验模型是否支持 vision 模态
+    if not llm_provider_manager.supports_modality(model, "vision"):
+        supported = llm_provider_manager.get_model_modalities(model)
+        raise ValueError(
+            f"模型 '{model}' 不支持视觉多模态 (vision)，当前支持模态: {supported}。"
+            f"如需图片理解，请选用配置了 'vision' 模态的模型（如 'orcarouter/Qwen3.8-27B-Uncensored:q3_K_M'）。"
+        )
+
+    # 规范化转码为纯 Base64 列表
+    normalized = normalize_images(images)
+    options["images"] = normalized
 
 
 def execute(task_id: str, **payload):
@@ -24,11 +44,12 @@ def execute(task_id: str, **payload):
     payload 期望字段:
       - model: str — 模型名称
       - prompt: str — 提示词
+      - images: list[str] (可选) — 图片文件路径/URL/Base64
       - options: dict (可选) — temperature, max_tokens 等
     """
     model = payload.get("model", "")
     prompt = payload.get("prompt", "")
-    options = payload.get("options", {})
+    options = dict(payload.get("options") or {})
 
     if not model or not prompt:
         TaskManager.update_task(task_id, TaskManager.STATUS_FAILED,
@@ -41,6 +62,9 @@ def execute(task_id: str, **payload):
 
         if TaskManager.is_cancelled(task_id):
             raise RuntimeError("任务已被用户手动停止")
+
+        # 校验并处理视觉多模态输入
+        _process_multimodal_images(model, payload, options)
             
         provider = llm_provider_manager.get_provider_for_model(model)
         result = provider.generate(model, prompt, options)
@@ -61,7 +85,7 @@ def execute_stream(task_id: str, output_queue: queue.Queue, started_event: threa
     """
     model = payload.get("model", "")
     prompt = payload.get("prompt", "")
-    options = payload.get("options", {})
+    options = dict(payload.get("options") or {})
 
     if not model or not prompt:
         output_queue.put(json.dumps({"error": "Missing 'model' or 'prompt' in payload"}))
@@ -75,6 +99,9 @@ def execute_stream(task_id: str, output_queue: queue.Queue, started_event: threa
         # 将 _service_name 传递给 options 便于 Provider 确定关联 of 本地物理服务
         if "_service_name" in payload:
             options["_service_name"] = payload["_service_name"]
+
+        # 校验并处理视觉多模态输入
+        _process_multimodal_images(model, payload, options)
 
         provider = llm_provider_manager.get_provider_for_model(model)
         provider.generate_stream(task_id, model, prompt, options, output_queue, started_event)

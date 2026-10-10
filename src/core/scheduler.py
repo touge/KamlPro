@@ -48,6 +48,7 @@ class TaskScheduler:
         self.current_service_name: Optional[str] = None
         self.is_running = False
         self.worker_thread = None
+        self.is_local_busy = False
 
         self.idle_timeout = yaml_config_loader.get("scheduler.idle_timeout", DEFAULT_SERVICE_IDLE_TIMEOUT)
         self.startup_timeout = yaml_config_loader.get("scheduler.startup_timeout", 300)
@@ -129,12 +130,12 @@ class TaskScheduler:
         track_mode = self.task_track_modes.get(task_type, "poll")
         model_name = payload.get("model", "")
 
-        # 判定是否为云端 API 任务 (通过大模型底座提供商路由判断，若不是 'ollama' 均路由至云端并行轨道)
+        # 判定是否为云端 API 任务 (根据大模型 tier 属性判断："api" 走云端并发，"local" 走本地串行)
         is_cloud_task = False
         if task_type in ("llm", "llm_streaming") and model_name:
             from src.core.providers.llm.manager import llm_provider_manager
-            provider_instance = llm_provider_manager.get_provider_for_model(model_name)
-            if provider_instance and provider_instance.name != "ollama":
+            model_tier = llm_provider_manager.get_model_tier(model_name)
+            if model_tier == "api":
                 is_cloud_task = True
 
         # 对所有流式任务，在调度器中注册其等待信号和数据队列以供统一的透明代理端点连接
@@ -166,7 +167,11 @@ class TaskScheduler:
             return can_stream
 
         # 本地 GPU 串行轨道
-        log.info(f"[Scheduler] >>> submit_task (本地 GPU): {task_id} ({task_type}), 当前队列大小={self.task_queue.qsize()}")
+        with self.api_lock:
+            # 当队列为空且当前本地 worker 空闲时，本地流式任务也支持免 WS 握手即时建流
+            can_stream = self.task_queue.empty() and not self.is_local_busy
+
+        log.info(f"[Scheduler] >>> submit_task (本地 GPU): {task_id} ({task_type}), 当前队列大小={self.task_queue.qsize()}, can_stream_immediately={can_stream}")
         task_item = {
             "type": task_type, "id": task_id, "payload": payload,
             "output_queue": output_queue, "started_event": started_event,
@@ -183,7 +188,7 @@ class TaskScheduler:
             "task_type": task_type,
             "track_mode": track_mode,
         })
-        return False
+        return can_stream
 
     def _run_cloud_task(self, task_type: str, task_id: str, payload: Dict[str, Any],
                         output_queue, started_event):
@@ -300,53 +305,72 @@ class TaskScheduler:
 
                 log.info(f"[Scheduler] Processing task {task_id} ({task_type})")
 
-                task_info = TaskManager.get_task(task_id)
-                if task_info and task_info.get("status") == TaskManager.STATUS_FAILED:
-                    log.info(f"[Scheduler] Task {task_id} was cancelled before execution. Skipping.")
-                    self.task_queue.task_done()
-                    next_type = self._peek_next_task_type()
-                    next_info = {
-                        "type": "task_completed",
+                self.is_local_busy = True
+                try:
+                    task_info = TaskManager.get_task(task_id)
+                    if task_info and task_info.get("status") == TaskManager.STATUS_FAILED:
+                        log.info(f"[Scheduler] Task {task_id} was cancelled before execution. Skipping.")
+                        self.task_queue.task_done()
+                        next_type = self._peek_next_task_type()
+                        next_info = {
+                            "type": "task_completed",
+                            "task_id": task_id,
+                            "next_task_id": None,
+                            "next_task_type": None,
+                            "next_track_mode": None,
+                        }
+                        if next_type:
+                            peek = self.task_queue.queue[0]
+                            next_info["next_task_id"] = peek["id"]
+                            next_info["next_task_type"] = next_type
+                            next_info["next_track_mode"] = peek.get("track_mode", self.task_track_modes.get(next_type, "poll"))
+                        ws_manager.broadcast_queue(next_info)
+                        continue
+
+                    # 如果任务还在排队状态，出队时变更为 RUNNING，并向 WS 广播 task_running 起跑信号
+                    if task_info and task_info.get("status") == TaskManager.STATUS_QUEUED:
+                        TaskManager.update_task(task_id, TaskManager.STATUS_RUNNING, {"message": "Local task out of queue, starting..."})
+                        ws_manager.send(task_id, {
+                            "type": "task_running",
+                            "status": TaskManager.STATUS_RUNNING,
+                            "task_id": task_id
+                        })
+
+                    # 通知流式端点：任务已开始执行
+                    if started_event:
+                        started_event.set()
+
+                    # 广播任务开始
+                    track_mode = task.get("track_mode", self.task_track_modes.get(task_type, "poll"))
+                    ws_manager.broadcast_queue({
+                        "type": "task_started",
                         "task_id": task_id,
-                        "next_task_id": None,
-                        "next_task_type": None,
-                        "next_track_mode": None,
-                    }
-                    if next_type:
-                        peek = self.task_queue.queue[0]
-                        next_info["next_task_id"] = peek["id"]
-                        next_info["next_task_type"] = next_type
-                        next_info["next_track_mode"] = peek.get("track_mode", self.task_track_modes.get(next_type, "poll"))
-                    ws_manager.broadcast_queue(next_info)
-                    continue
+                        "task_type": task_type,
+                        "track_mode": track_mode,
+                    })
 
-                # 通知流式端点：任务已开始执行
-                if started_event:
-                    started_event.set()
-
-                # 广播任务开始
-                track_mode = task.get("track_mode", self.task_track_modes.get(task_type, "poll"))
-                ws_manager.broadcast_queue({
-                    "type": "task_started",
-                    "task_id": task_id,
-                    "task_type": task_type,
-                    "track_mode": track_mode,
-                })
-
-                # 服务管理
-                required_service = self.task_service_map.get(task_type)
-                if required_service:
-                    if self.current_service_name != required_service:
-                        if self.current_service_name:
-                            log.info(f"[Scheduler] Switching service: '{self.current_service_name}' -> '{required_service}'")
-                            self._stop_current_service()
-                        self._start_service(required_service)
+                    # 服务管理：大模型任务根据模型动态获取物理微服务名（如 "Ollama"），其他任务从配置表映射
+                    if task_type in ("llm", "llm_streaming"):
+                        from src.core.providers.llm.manager import llm_provider_manager
+                        model_name = payload.get("model", "")
+                        required_service = llm_provider_manager.get_service_name_for_model(model_name)
                     else:
-                        log.info(f"[Scheduler] Reusing active service '{self.current_service_name}'")
+                        required_service = self.task_service_map.get(task_type)
 
-                # 执行任务（传入服务名，executor 不需要硬编码）
-                self._execute_task_logic(task_type, task_id, payload, output_queue, required_service)
-                self.task_queue.task_done()
+                    if required_service:
+                        if self.current_service_name != required_service:
+                            if self.current_service_name:
+                                log.info(f"[Scheduler] Switching service: '{self.current_service_name}' -> '{required_service}'")
+                                self._stop_current_service()
+                            self._start_service(required_service)
+                        else:
+                            log.info(f"[Scheduler] Reusing active service '{self.current_service_name}'")
+
+                    # 执行任务（传入服务名与 started_event，executor 不需要硬编码）
+                    self._execute_task_logic(task_type, task_id, payload, output_queue, required_service, started_event)
+                    self.task_queue.task_done()
+                finally:
+                    self.is_local_busy = False
 
                 # 广播任务完成（含下一任务信息）
                 next_type = self._peek_next_task_type()
@@ -420,12 +444,15 @@ class TaskScheduler:
     def _maybe_free_resources(self, service_name: str, current_task_type: str):
         """
         根据队列中下一个任务类型决定是否释放当前服务资源。
-        下一个任务是同类型 → 跳过释放，模型常驻，避免重复加载。
+        下一个任务是同服务/同类型（如 llm 与 llm_streaming 均为大模型） → 跳过释放，模型常驻，避免重复加载。
         下一个任务是不同类型或队列为空 → 释放资源。
         """
         next_type = self._peek_next_task_type()
-        if next_type == current_task_type:
-            log.info(f"[Scheduler] Next task is same type ({current_task_type}), skipping free.")
+        is_same_type = (next_type == current_task_type) or (
+            next_type in ("llm", "llm_streaming") and current_task_type in ("llm", "llm_streaming")
+        )
+        if is_same_type:
+            log.info(f"[Scheduler] Next task '{next_type}' shares service with '{current_task_type}', skipping free.")
             return
         log.info(f"[Scheduler] Next task '{next_type}' != current '{current_task_type}', freeing resources...")
         self._free_service_resources(service_name)
@@ -473,7 +500,7 @@ class TaskScheduler:
             log.warning(f"[Scheduler] Free failed (non-critical): {e}")
 
     def _execute_task_logic(self, task_type: str, task_id: str, payload: Dict[str, Any],
-                            output_queue=None, service_name=None):
+                            output_queue=None, service_name=None, started_event=None):
         try:
             executor = self.task_executors.get(task_type)
             if executor:
@@ -482,7 +509,7 @@ class TaskScheduler:
                     payload["_service_name"] = service_name
                 log.info(f"[Scheduler] >>> 开始执行: {task_id} ({task_type}), executor={executor.__module__}.{executor.__name__}, service={service_name}")
                 if output_queue is not None:
-                    executor(task_id, output_queue, **payload)
+                    executor(task_id, output_queue, started_event, **payload)
                 else:
                     executor(task_id, **payload)
                 log.info(f"[Scheduler] >>> 执行完成: {task_id} ({task_type})")

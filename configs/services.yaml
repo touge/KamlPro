@@ -151,5 +151,5 @@ GeminiProxyAPI:
   platforms:
     windows:
       type: cmd
-      path: "D:/Apps/Gemini-FastAPI/launcher.bat"
+      path: "D:/AIGC/Gemini-FastAPI/launcher.bat"
 

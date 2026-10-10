@@ -30,8 +30,10 @@ class OllamaProvider(BaseLLMProvider):
             "model": model,
             "prompt": prompt,
             "stream": False,
-            "options": {k: v for k, v in options.items() if v is not None and not k.startswith("_")},
+            "options": {k: v for k, v in options.items() if v is not None and not k.startswith("_") and k != "images"},
         }
+        if "images" in options and options["images"]:
+            req_data["images"] = options["images"]
 
         # 针对特定大模型过滤思考机制，避免冗余数据
         if any(tag in model for tag in ("qwen3", "deepseek", "qwq")):
@@ -74,8 +76,10 @@ class OllamaProvider(BaseLLMProvider):
             "model": model,
             "prompt": prompt,
             "stream": True,
-            "options": {k: v for k, v in options.items() if v is not None and not k.startswith("_")},
+            "options": {k: v for k, v in options.items() if v is not None and not k.startswith("_") and k != "images"},
         }
+        if "images" in options and options["images"]:
+            req_data["images"] = options["images"]
 
         if any(tag in model for tag in ("qwen3", "deepseek", "qwq")):
             req_data["think"] = False

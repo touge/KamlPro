@@ -20,6 +20,21 @@ from src.logic.logger import log
 
 @register_provider("openai_compatible")
 class OpenAICompatibleProvider(BaseLLMProvider):
+    @staticmethod
+    def _build_messages(prompt: str, options: dict) -> list:
+        """根据是否包含图片，构建单轮或多模态消息体"""
+        images = options.get("images")
+        if not images:
+            return [{"role": "user", "content": prompt}]
+        content_list = [{"type": "text", "text": prompt}]
+        for img in images:
+            img_url = img if str(img).startswith("data:") else f"data:image/jpeg;base64,{img}"
+            content_list.append({
+                "type": "image_url",
+                "image_url": {"url": img_url}
+            })
+        return [{"role": "user", "content": content_list}]
+
     def generate(self, model: str, prompt: str, options: dict) -> dict:
         base_url = self.config.get("base_url", "")
         api_key = self._resolve_env_var(self.config.get("api_key", ""))
@@ -45,12 +60,12 @@ class OpenAICompatibleProvider(BaseLLMProvider):
 
         req_data = {
             "model": model,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": self._build_messages(prompt, options),
             "stream": False,
             "temperature": options.get("temperature") if options.get("temperature") is not None else 0.7,
             "max_tokens": options.get("max_tokens") or options.get("max_predict"),
         }
-        req_data = {k: v for k, v in req_data.items() if v is not None and not k.startswith("_")}
+        req_data = {k: v for k, v in req_data.items() if v is not None and not k.startswith("_") and k != "images"}
 
         resp = requests.post(api_url, json=req_data, headers=headers, timeout=120)
         resp.raise_for_status()
@@ -118,12 +133,12 @@ class OpenAICompatibleProvider(BaseLLMProvider):
 
         req_data = {
             "model": model,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": self._build_messages(prompt, options),
             "stream": True,
             "temperature": options.get("temperature") if options.get("temperature") is not None else 0.7,
             "max_tokens": options.get("max_tokens") or options.get("max_predict"),
         }
-        req_data = {k: v for k, v in req_data.items() if v is not None and not k.startswith("_")}
+        req_data = {k: v for k, v in req_data.items() if v is not None and not k.startswith("_") and k != "images"}
 
         full_text = ""
         TaskManager.update_task(task_id, TaskManager.STATUS_RUNNING, {"message": "Cloud LLM streaming started"})
