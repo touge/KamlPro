@@ -157,12 +157,18 @@ async def submit_task(request: Request):
         return error(f"Failed to submit task: {str(e)}", 500)
 
 
+from src.logic.asset_resolver import AssetResolver
+
+
 @router.post("/tasks/{task_id}/assets")
 async def upload_task_assets(task_id: str, request: Request):
     """
-    按需延迟上传资产端点（JIT 素材注入接口）。
-    当任务轮到并收到 task_asset_required 广播后，客户端调用本端点上传素材。
-    接收 multipart/form-data，保存至 tasks/{task_id}/，回填至任务 payload，通知调度器开闸。
+    按需延迟上传资产端点（JIT 素材注入接口 - 两级秒传架构）。
+    支持两种开闸模式：
+      1. 纯免传开闸 (application/json 或 multipart 表单中的 reuse_assets):
+         无需上传任何二进制大文件，声明已存在的文件名，服务端自动寻址并软链开闸。
+      2. 混合上传 (multipart/form-data):
+         支持部分上传新文件，其余通过 reuse_assets 字段声明复用。
     """
     task = TaskManager.get_task(task_id)
     if task.get("status") == "not_found":
@@ -172,53 +178,106 @@ async def upload_task_assets(task_id: str, request: Request):
         return error(f"Task '{task_id}' has already finished with status '{task.get('status')}'", 400)
 
     # 标记状态为正在上传，防止 30s 调度器超时误杀
-    TaskManager.update_task(task_id, TaskManager.STATUS_ASSET_UPLOADING, {"message": "资产素材上传中..."})
+    TaskManager.update_task(task_id, TaskManager.STATUS_ASSET_UPLOADING, {"message": "资产素材注入中..."})
 
     content_type = request.headers.get("content-type", "")
-    if "multipart/form-data" not in content_type:
-        return error("Content-Type must be multipart/form-data for uploading assets", 400)
+    task_dir = TASK_FOLDER / task_id
+    task_dir.mkdir(parents=True, exist_ok=True)
+
+    new_payload_fields: Dict[str, Any] = {}
+    saved_files: Dict[str, str] = {}
+    reused_files: Dict[str, str] = {}
+    reuse_assets_raw = None
 
     try:
-        form = await request.form()
-        task_dir = TASK_FOLDER / task_id
-        task_dir.mkdir(parents=True, exist_ok=True)
+        # ---- 模式 1: application/json (纯免传开闸) ----
+        if "application/json" in content_type:
+            body = await request.json()
+            reuse_assets_raw = body.get("reuse_assets")
+            # 允许顺带传递其他普通 payload 字段
+            for k, v in body.items():
+                if k != "reuse_assets":
+                    new_payload_fields[k] = v
 
-        new_payload_fields: Dict[str, Any] = {}
-        saved_files: Dict[str, str] = {}
+        # ---- 模式 2: multipart/form-data (混合上传或表单免传) ----
+        elif "multipart/form-data" in content_type:
+            form = await request.form()
+            for field_name, value in form.items():
+                if field_name == "reuse_assets":
+                    reuse_assets_raw = value
+                    continue
+                if hasattr(value, "filename") and value.filename:
+                    filename = value.filename
+                    ext = Path(filename).suffix or ".bin"
+                    file_path = task_dir / f"{field_name}{ext}"
+                    content = await value.read()
+                    file_path.write_bytes(content)
+                    new_payload_fields[f"{field_name}_path"] = str(file_path)
+                    saved_files[field_name] = str(file_path)
+                    log.info(f"[API] Asset uploaded for task {task_id}: {field_name} -> {file_path} ({len(content)} bytes)")
+                else:
+                    new_payload_fields[field_name] = value
+        else:
+            return error("Content-Type must be application/json or multipart/form-data", 400)
 
-        for field_name, value in form.items():
-            if hasattr(value, "filename") and value.filename:
-                filename = value.filename
-                ext = Path(filename).suffix or ".bin"
-                # 保存文件
-                file_path = task_dir / f"{field_name}{ext}"
-                content = await value.read()
-                file_path.write_bytes(content)
-                new_payload_fields[f"{field_name}_path"] = str(file_path)
-                saved_files[field_name] = str(file_path)
-                log.info(f"[API] Asset uploaded for task {task_id}: {field_name} -> {file_path} ({len(content)} bytes)")
-            else:
-                new_payload_fields[field_name] = value
+        # ---- 处理资产复用声明 (reuse_assets) ----
+        if reuse_assets_raw:
+            assets_to_resolve = []
+            if isinstance(reuse_assets_raw, str):
+                try:
+                    parsed = json.loads(reuse_assets_raw)
+                    if isinstance(parsed, (list, dict)):
+                        assets_to_resolve = parsed
+                    else:
+                        assets_to_resolve = [s.strip() for s in reuse_assets_raw.split(",") if s.strip()]
+                except Exception:
+                    assets_to_resolve = [s.strip() for s in reuse_assets_raw.split(",") if s.strip()]
+            elif isinstance(reuse_assets_raw, (list, dict)):
+                assets_to_resolve = reuse_assets_raw
 
-        if not saved_files and not new_payload_fields:
-            return error("No assets or fields provided in request", 400)
+            # 遍历解析资产
+            if isinstance(assets_to_resolve, dict):
+                for custom_key, asset_name in assets_to_resolve.items():
+                    resolved_path = AssetResolver.resolve_asset(asset_name)
+                    if not resolved_path:
+                        return error(f"Reused asset '{asset_name}' not found in server repository or ComfyUI input", 400)
+                    mapped_path = AssetResolver.link_or_copy(resolved_path, task_dir)
+                    new_payload_fields[f"{custom_key}_path"] = str(mapped_path)
+                    new_payload_fields[custom_key] = str(mapped_path)
+                    reused_files[custom_key] = str(mapped_path)
+                    log.info(f"[API] Reused asset resolved for task {task_id}: key='{custom_key}', {asset_name} -> {mapped_path}")
+            elif isinstance(assets_to_resolve, (list, tuple)):
+                for asset_name in assets_to_resolve:
+                    resolved_path = AssetResolver.resolve_asset(asset_name)
+                    if not resolved_path:
+                        return error(f"Reused asset '{asset_name}' not found in server repository or ComfyUI input", 400)
+                    mapped_path = AssetResolver.link_or_copy(resolved_path, task_dir)
+                    stem = Path(asset_name).stem
+                    new_payload_fields[f"{stem}_path"] = str(mapped_path)
+                    reused_files[asset_name] = str(mapped_path)
+                    log.info(f"[API] Reused asset resolved for task {task_id}: {asset_name} -> {mapped_path}")
+
+        if not saved_files and not reused_files and not new_payload_fields:
+            return error("No assets uploaded, reused, or fields provided in request", 400)
 
         # 更新任务 payload 与资产状态
         TaskManager.update_task_payload(task_id, new_payload_fields)
         TaskManager.update_asset_status(task_id, "ready")
 
-        # 解除调度器等待
+        # 解除调度器等待，毫秒级开闸交付 GPU！
         scheduler.notify_asset_ready(task_id)
 
-        log.info(f"[API] Task {task_id} assets successfully uploaded and marked ready. Files: {list(saved_files.keys())}")
-        return success(message="Assets uploaded successfully and task released", data={
+        log.info(f"[API] Task {task_id} assets READY! Uploaded: {list(saved_files.keys())}, Reused: {list(reused_files.keys())}")
+        return success(message="Assets injected successfully and task released", data={
             "task_id": task_id,
             "asset_status": "ready",
             "files": saved_files,
+            "uploaded_files": saved_files,
+            "reused_files": reused_files,
         })
     except Exception as e:
-        log.error(f"[API] Failed to upload assets for task {task_id}: {e}", exc_info=True)
-        return error(f"Failed to process asset upload: {str(e)}", 500)
+        log.error(f"[API] Failed to process assets for task {task_id}: {e}", exc_info=True)
+        return error(f"Failed to process asset upload/reuse: {str(e)}", 500)
 
 
 def _track_hint(mode: str, task_id: str) -> str:

@@ -13,10 +13,12 @@
 """
 
 import asyncio
+import json
 import os
 import sys
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, AsyncMock
 
 # 确保项目根目录在 sys.path 中
@@ -38,6 +40,12 @@ class TestSingleTrackQueue(unittest.TestCase):
 
     def tearDown(self):
         self.loop.close()
+
+    @classmethod
+    def tearDownClass(cls):
+        import shutil
+        if Path("assets").exists():
+            shutil.rmtree("assets", ignore_errors=True)
 
     def test_01_task_manager_client_id_isolation(self):
         """测试 1: TaskManager 对 client_id 的记录与多租户过滤"""
@@ -310,8 +318,108 @@ class TestSingleTrackQueue(unittest.TestCase):
         ws_manager.clear_task_progress(tid)
         ws_manager.unregister(tid)
 
+    def test_11_pure_zero_byte_asset_reuse_json(self):
+        """测试 11: 建议2场景B - 纯 JSON 免传开闸 (0 字节传输秒传开闸)"""
+        from src.logic.yaml_config_loader import yaml_config_loader
+        valid_tokens = yaml_config_loader.get("api_server.tokens", [])
+        token = valid_tokens[0] if valid_tokens else ""
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+
+        # 1. 模拟远端 assets/ 目录已存在的公共角色物料
+        assets_dir = Path("assets")
+        assets_dir.mkdir(exist_ok=True)
+        sample_hero = assets_dir / "lin_zhi_wei.jpeg"
+        sample_hero.write_bytes(b"MOCK_HERO_IMAGE_BYTES")
+
+        client = TestClient(app)
+
+        # 2. 提交任务，初始 asset_status="not_ready"
+        resp = client.post("/interface/tasks/submit", headers=headers, json={
+            "task_type": "comfyui",
+            "client_id": "client_drama_producer",
+            "asset_status": "not_ready",
+            "required_assets": ["lin_zhi_wei.jpeg"],
+            "payload": {
+                "shot_index": "Shot_01"
+            }
+        })
+        self.assertEqual(resp.status_code, 200)
+        task_id = resp.json()["data"]["task_id"]
+
+        # 3. 客户端直接发起纯 JSON 免传开闸声明 (无需 multipart，0 字节大文件网络传输)
+        reuse_resp = client.post(
+            f"/interface/tasks/{task_id}/assets",
+            headers=headers,
+            json={
+                "reuse_assets": ["lin_zhi_wei.jpeg"]
+            }
+        )
+        self.assertEqual(reuse_resp.status_code, 200)
+        data = reuse_resp.json()["data"]
+        self.assertEqual(data["asset_status"], "ready")
+        self.assertIn("lin_zhi_wei.jpeg", data["reused_files"])
+
+        # 4. 验证任务状态已被置为 ready，并且 payload 中已注入文件路径
+        updated = TaskManager.get_task(task_id)
+        self.assertEqual(updated["asset_status"], "ready")
+        payload = TaskManager.get_task_payload(task_id)
+        self.assertIn("lin_zhi_wei_path", payload)
+        self.assertTrue(os.path.exists(payload["lin_zhi_wei_path"]))
+
+    def test_12_mixed_upload_and_reuse_assets(self):
+        """测试 12: 建议2场景A - 混合表单模式 (上传 1 个新分镜文件 + 复用 1 个已有物料)"""
+        from src.logic.yaml_config_loader import yaml_config_loader
+        import io
+        valid_tokens = yaml_config_loader.get("api_server.tokens", [])
+        token = valid_tokens[0] if valid_tokens else ""
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+
+        # 确保公共物料存在
+        assets_dir = Path("assets")
+        assets_dir.mkdir(exist_ok=True)
+        sample_voice = assets_dir / "lin_voice.flac"
+        sample_voice.write_bytes(b"MOCK_HERO_AUDIO_BYTES")
+
+        client = TestClient(app)
+
+        # 1. 提交分镜任务
+        resp = client.post("/interface/tasks/submit", headers=headers, json={
+            "task_type": "comfyui",
+            "client_id": "client_drama_producer",
+            "asset_status": "not_ready",
+            "payload": {
+                "shot_index": "Shot_02"
+            }
+        })
+        self.assertEqual(resp.status_code, 200)
+        task_id = resp.json()["data"]["task_id"]
+
+        # 2. 混合表单上传：上传当前镜头特有的草图，并声明复用已有的音色
+        fake_sketch = io.BytesIO(b"MOCK_NEW_SKETCH_BYTES")
+        mixed_resp = client.post(
+            f"/interface/tasks/{task_id}/assets",
+            headers=headers,
+            files={"shot_sketch": ("sketch_02.png", fake_sketch, "image/png")},
+            data={"reuse_assets": json.dumps({"voice_ref": "lin_voice.flac"})}
+        )
+        self.assertEqual(mixed_resp.status_code, 200)
+        data = mixed_resp.json()["data"]
+        self.assertEqual(data["asset_status"], "ready")
+        self.assertIn("shot_sketch", data["uploaded_files"])
+        self.assertIn("voice_ref", data["reused_files"])
+
+        # 3. 验证任务就绪且所有物料均映射成功
+        updated = TaskManager.get_task(task_id)
+        self.assertEqual(updated["asset_status"], "ready")
+        payload = TaskManager.get_task_payload(task_id)
+        self.assertIn("shot_sketch_path", payload)
+        self.assertIn("voice_ref_path", payload)
+        self.assertTrue(os.path.exists(payload["shot_sketch_path"]))
+        self.assertTrue(os.path.exists(payload["voice_ref_path"]))
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 

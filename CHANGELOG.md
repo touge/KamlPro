@@ -18,12 +18,14 @@
   - 调度吹哨等待：当任务轮到且 `asset_status != "ready"` 时，向单轨 WS 发送 `task_asset_required` 吹哨广播并阻塞等待 30 秒。
   - 防误杀 Watchdog：若客户端正在上传中（`asset_uploading`），自动延长等待至 300 秒，保证大文件完整传输不被误杀。
   - 连坐清理联动：吹哨超时未响应或客户端断开 WS 超过 30 秒时，调用 `purge_client_tasks()` 连坐清理排队任务，拒绝浪费 GPU。
-- **`src/api/routes/tasks.py`**:
-  - `POST /tasks/submit`: 支持 `asset_status="not_ready"` 与 `required_assets` 声明，轻量化入队。
-  - `POST /tasks/{task_id}/assets`: 新增按需素材补交接口，接收 `multipart/form-data`，落盘保存至 `tasks/{id}/`，动态回填 payload 并解除调度器等待。
+- **`src/logic/asset_resolver.py` & `src/api/routes/tasks.py`**:
+  - **两级秒传架构落地**：针对短剧推演场景多镜头复用主角图/音色痛点，升级 `POST /tasks/{task_id}/assets`。
+  - 支持纯 JSON 免传开闸（场景 B）：发送 `reuse_assets: [...]`，0 字节大文件传输，服务端在 ComfyUI `input/`、历史任务及全局资产库自动检索并建立软链接映射，毫秒级开闸交付 GPU！
+  - 支持混合表单上传（场景 A）：支持上传新分镜文件同时携带 `reuse_assets` 复用旧物料。
+  - 级别 1 客户端预检直通：前端提交 `asset_status: "ready"` 时跳过吹哨直接起跑。
 - **自动化测试与接入文档**:
-  - `test/20261010/test_single_track_queue.py`: 新增 JIT 延迟素材上传流程、连坐清理及离线判定 3 个集成测试用例（9/9 100% 通过）。
-  - `docs/下游接入契约.md`: 增加第 12 节详细规约与时序图。
+  - `test/20261010/test_single_track_queue.py`: 新增纯 JSON 免传开闸及混合表单复用 2 个集成测试（12/12 100% 通过）。
+  - `docs/下游接入契约.md`: 丰富第 12.4 节为《专属素材注入与两级秒传架构》，提供详细参数与响应示例。
 
 ---
 
