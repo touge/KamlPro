@@ -22,6 +22,7 @@ router = APIRouter(tags=["LLM"])
 class GenerateRequest(BaseModel):
     model: str
     prompt: str
+    client_id: Optional[str] = None
     options: Optional[Dict[str, Any]] = {}
 
 
@@ -42,12 +43,15 @@ async def list_models():
 
 @router.post("/llm/generate")
 async def generate(req: GenerateRequest):
+    if not req.client_id or not str(req.client_id).strip():
+        return error("Missing required field 'client_id'. Please specify client_id.", 400)
+
     task_type = "llm"
-    task_id = TaskManager.create_task(task_type)
-    payload = {"model": req.model, "prompt": req.prompt, "options": req.options}
+    task_id = TaskManager.create_task(task_type, client_id=req.client_id)
+    payload = {"model": req.model, "prompt": req.prompt, "options": req.options, "client_id": req.client_id}
 
     try:
-        scheduler.submit_task(task_type, task_id, payload)
+        scheduler.submit_task(task_type, task_id, payload, client_id=req.client_id)
         TaskManager.update_task(task_id, TaskManager.STATUS_QUEUED)
         log.info(f"[LLM API] Task {task_id}: model={req.model}")
         return success(data={

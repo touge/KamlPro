@@ -48,24 +48,29 @@ class TestSingleTrackQueue(unittest.TestCase):
             shutil.rmtree("assets", ignore_errors=True)
 
     def test_01_task_manager_client_id_isolation(self):
-        """测试 1: TaskManager 对 client_id 的记录与多租户过滤"""
+        """测试 1: TaskManager 对 client_id 的记录与强校验拦截（无 client_id 抛出异常中断）"""
         t1 = TaskManager.create_task("image", client_id="client_A")
         t2 = TaskManager.create_task("tts", client_id="client_B")
         t3 = TaskManager.create_task("llm", client_id="client_A")
-        t_anon = TaskManager.create_task("image", client_id=None)
+
+        # 强校验：缺失或空 client_id 严厉抛出 ValueError 中断，拒绝任何弱智兜底！
+        with self.assertRaises(ValueError):
+            TaskManager.create_task("image", client_id=None)
+        with self.assertRaises(ValueError):
+            TaskManager.create_task("image", client_id="")
+        with self.assertRaises(ValueError):
+            TaskManager.create_task("image", client_id="   ")
 
         all_tasks = TaskManager.list_tasks()
         self.assertIn(t1, all_tasks)
         self.assertIn(t2, all_tasks)
         self.assertIn(t3, all_tasks)
-        self.assertIn(t_anon, all_tasks)
 
         # 仅查询 client_A
         tasks_a = TaskManager.list_tasks(client_id="client_A")
         self.assertIn(t1, tasks_a)
         self.assertIn(t3, tasks_a)
         self.assertNotIn(t2, tasks_a)
-        self.assertNotIn(t_anon, tasks_a)
 
         # 仅查询 client_B
         tasks_b = TaskManager.list_tasks(client_id="client_B")
@@ -99,6 +104,16 @@ class TestSingleTrackQueue(unittest.TestCase):
         mock_ws_a1.send_json.assert_called_once_with({"msg": "hello_alpha"})
         mock_ws_a2.send_json.assert_called_once_with({"msg": "hello_alpha"})
         mock_ws_b.send_json.assert_not_called()
+
+        # 强校验：缺失 client_id 调用 subscribe_queue / send_to_client / emit_to_client 必须直接抛出 ValueError！
+        with self.assertRaises(ValueError):
+            ws_manager.subscribe_queue("ws_bad", mock_ws_a1, client_id=None)
+        with self.assertRaises(ValueError):
+            ws_manager.subscribe_queue("ws_bad", mock_ws_a1, client_id="")
+        with self.assertRaises(ValueError):
+            ws_manager.send_to_client("", {"type": "test"})
+        with self.assertRaises(ValueError):
+            ws_manager.emit_to_client(None, {"type": "test"})
 
         # 注销 ws_1
         ws_manager.unsubscribe_queue("ws_1")
@@ -149,6 +164,14 @@ class TestSingleTrackQueue(unittest.TestCase):
         headers = {"Authorization": f"Bearer {token}"} if token else {}
 
         client = TestClient(app)
+
+        # 强校验：不带 client_id 提交任务必须直接返回 400 严厉拒绝！
+        bad_resp = client.post("/interface/tasks/submit", headers=headers, json={
+            "task_type": "comfyui",
+            "payload": {"workflow": {}}
+        })
+        self.assertEqual(bad_resp.status_code, 400)
+        self.assertIn("Missing required field 'client_id'", bad_resp.json()["message"])
 
         # 提交带 client_id 的测试任务
         resp = client.post("/interface/tasks/submit", headers=headers, json={
@@ -417,9 +440,130 @@ class TestSingleTrackQueue(unittest.TestCase):
         self.assertTrue(os.path.exists(payload["shot_sketch_path"]))
         self.assertTrue(os.path.exists(payload["voice_ref_path"]))
 
+    def test_13_queue_positions_updated_lifecycle(self):
+        """测试 13: 验证轻量顺位流转广播 queue_positions_updated 全生命周期流转 (动作A, B, C)"""
+        mock_ws = MagicMock()
+        mock_ws.send_json = AsyncMock()
+        ws_manager.subscribe_queue("ws_flow_test", mock_ws, client_id="client_shot_flow")
+
+        try:
+            # 清理调度器旧队列以准备干净测试环境
+            with scheduler.task_queue.mutex:
+                scheduler.task_queue.queue.clear()
+                scheduler.task_queue.unfinished_tasks = 0
+
+            # 模拟入队 4 个分镜任务
+            t1 = TaskManager.create_task("comfyui", client_id="client_shot_flow")
+            t2 = TaskManager.create_task("comfyui", client_id="client_shot_flow")
+            t3 = TaskManager.create_task("comfyui", client_id="client_shot_flow")
+            t4 = TaskManager.create_task("comfyui", client_id="client_shot_flow")
+            for tid in (t1, t2, t3, t4):
+                scheduler.task_queue.put({"id": tid, "type": "comfyui", "client_id": "client_shot_flow"})
+
+            scheduler.broadcast_queue_positions()
+            self.loop.run_until_complete(asyncio.sleep(0.01))
+
+            # 初始状态：4 个任务全在队列中
+            pos_initial = scheduler.get_queue_positions(client_id="client_shot_flow")
+            self.assertEqual(pos_initial, {t1: 1, t2: 2, t3: 3, t4: 4})
+
+            # 🌟 动作 A：任务 1 出队并开始执行 (task_started)
+            popped_t1 = scheduler.task_queue.get()
+            self.assertEqual(popped_t1["id"], t1)
+            scheduler.broadcast_queue_positions()
+            self.loop.run_until_complete(asyncio.sleep(0.01))
+
+            # 验证剩余队列顺位自动向前递减：t2->1, t3->2, t4->3
+            pos_after_a = scheduler.get_queue_positions(client_id="client_shot_flow")
+            self.assertEqual(pos_after_a, {t2: 1, t3: 2, t4: 3})
+
+            # 🌟 动作 B：任务 1 执行完毕，任务 2 出队开始执行
+            popped_t2 = scheduler.task_queue.get()
+            self.assertEqual(popped_t2["id"], t2)
+            scheduler.broadcast_queue_positions()
+            self.loop.run_until_complete(asyncio.sleep(0.01))
+
+            # 验证此时队列仅剩 t3 和 t4：t3->1, t4->2
+            pos_after_b = scheduler.get_queue_positions(client_id="client_shot_flow")
+            self.assertEqual(pos_after_b, {t3: 1, t4: 2})
+
+            # 🌟 动作 C：用户手动取消队列中的任务 3 (task_cancelled)
+            removed = scheduler.remove_from_queue(t3)
+            self.assertTrue(removed)
+            self.loop.run_until_complete(asyncio.sleep(0.01))
+
+            # 验证取消出队后，t4 顺位从 2 瞬时变为 1
+            pos_after_c = scheduler.get_queue_positions(client_id="client_shot_flow")
+            self.assertEqual(pos_after_c, {t4: 1})
+
+            # 任务 4 最终也出队执行
+            popped_t4 = scheduler.task_queue.get()
+            self.assertEqual(popped_t4["id"], t4)
+            scheduler.broadcast_queue_positions()
+            self.loop.run_until_complete(asyncio.sleep(0.01))
+
+            # 队列排队任务全部清空，返回空字典 {}
+            pos_empty = scheduler.get_queue_positions(client_id="client_shot_flow")
+            self.assertEqual(pos_empty, {})
+
+            # 检查 mock_ws 收到的一系列 queue_positions_updated 数据包
+            sent_msgs = [call.args[0] for call in mock_ws.send_json.call_args_list if call.args[0].get("type") == "queue_positions_updated"]
+            self.assertTrue(len(sent_msgs) >= 4)
+            self.assertEqual(sent_msgs[-1]["data"], {})
+            self.assertEqual(sent_msgs[-2]["data"], {t4: 1})
+
+        finally:
+            ws_manager.unsubscribe_queue("ws_flow_test")
+
+    def test_14_cancel_task_api_removes_from_queue_and_emits_cancelled(self):
+        """测试 14: 验证取消接口 POST /tasks/{id}/cancel 能够主动移出队列并广播 task_cancelled"""
+        from src.logic.yaml_config_loader import yaml_config_loader
+        valid_tokens = yaml_config_loader.get("api_server.tokens", [])
+        token = valid_tokens[0] if valid_tokens else ""
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+
+        # 1. 订阅队列广播
+        client = TestClient(app)
+        mock_ws = MagicMock()
+        mock_ws.send_json = AsyncMock()
+        ws_manager.subscribe_queue("ws_cancel_test", mock_ws, client_id="client_cancel_test")
+
+        try:
+            # 提交排队任务 (声明素材未就绪以避免调度器在测试中断言前瞬间出队)
+            resp = client.post("/interface/tasks/submit", headers=headers, json={
+                "task_type": "comfyui",
+                "client_id": "client_cancel_test",
+                "asset_status": "not_ready",
+                "required_assets": ["sketch.png"],
+                "payload": {"prompt": "test cancel queued"}
+            })
+            self.assertEqual(resp.status_code, 200)
+            task_id = resp.json()["data"]["task_id"]
+
+            # 2. 调用取消接口
+            cancel_resp = client.post(f"/interface/tasks/{task_id}/cancel", headers=headers)
+            self.assertEqual(cancel_resp.status_code, 200)
+
+            # 3. 验证任务状态置为 FAILED
+            task_info = TaskManager.get_task(task_id)
+            self.assertEqual(task_info["status"], TaskManager.STATUS_FAILED)
+
+            # 4. 验证任务已不在调度器队列中
+            positions = scheduler.get_queue_positions("client_cancel_test")
+            self.assertNotIn(task_id, positions)
+
+            # 5. 验证 WS 广播捕获到了 task_cancelled 和 queue_positions_updated
+            self.loop.run_until_complete(asyncio.sleep(0.01))
+            msg_types = [call.args[0].get("type") for call in mock_ws.send_json.call_args_list]
+            self.assertIn("task_cancelled", msg_types)
+            self.assertIn("queue_positions_updated", msg_types)
+        finally:
+            ws_manager.unsubscribe_queue("ws_cancel_test")
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

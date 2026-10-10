@@ -26,6 +26,7 @@ router = APIRouter(tags=["Streaming"])
 class LLMGenerateStreamRequest(BaseModel):
     model: str
     prompt: str
+    client_id: Optional[str] = None
     options: Optional[Dict[str, Any]] = {}
 
 
@@ -34,15 +35,19 @@ STREAM_START_TIMEOUT = 60  # 等待队列分配的超时时间（秒）
 
 @router.post("/llm/generate-stream")
 async def llm_generate_stream(req: LLMGenerateStreamRequest):
-    task_id = TaskManager.create_task("llm_streaming")
+    if not req.client_id or not str(req.client_id).strip():
+        return error("Missing required field 'client_id'. Please specify client_id.", 400)
+
+    task_id = TaskManager.create_task("llm_streaming", client_id=req.client_id)
 
     output_queue: queue.Queue = queue.Queue(maxsize=256)
     started_event = threading.Event()
 
     scheduler.submit_task(
         "llm_streaming", task_id,
-        {"model": req.model, "prompt": req.prompt, "options": req.options or {}},
+        {"model": req.model, "prompt": req.prompt, "options": req.options or {}, "client_id": req.client_id},
         output_queue=output_queue, started_event=started_event,
+        client_id=req.client_id,
     )
 
     if not started_event.wait(timeout=STREAM_START_TIMEOUT):

@@ -1,6 +1,30 @@
 # Changelog
 
-## [Unreleased] - 2026-10-10
+## [v1.4.1] - 2026-10-11
+
+### ⚡ 队列顺位轻量广播精简、严格零兜底强校验与单轨全生命周期标准收敛
+
+针对真实短剧推演等复杂高并发场景中下游对接暴露的顺位卡死、重复冗余广播、多通道事件歧义以及匿名妥协兜底痛点进行的系统级规范收敛：
+
+- **排队顺位流转广播收敛（仅在任务实质离开队列时触发）**:
+  - `src/core/scheduler.py`: 仅保留调度器出队起跑/吹哨（1 次）以及用户主动取消排队（1 次）两处实质出队触发点，彻底移除在 `task_completed`、`task_failed`、`task_enqueued` 处的无效重复广播；
+  - 连上握手增强（`queue_ws.py`）：首帧下发 `queue_snapshot` 后紧跟推送 `queue_positions_updated` 实时映射字典 `{ [task_id]: position }`，驱动客户端即时校准；
+  - 新增 `remove_from_queue(task_id)` 与 `abort_asset_wait(task_id)`：支持排队中或等待素材中的任务被取消时即时移出 FIFO 队列并触发广播 `task_cancelled`。
+- **出队生命周期与进度事件规范统一**:
+  - 移除出队时的多余历史事件 `task_running`，统一只下发标准的 `type: "task_started"`；
+  - 全局单轨长连接（`/queue/ws`）统一度量衡进度为 `type: "task_progress"`（300ms 智能节流防洪），指导下游彻底摒弃杂乱的旧单任务连接及底层私有报文（`progress` / `overall_progress`）。
+- **严格零兜底原则（Fail-Fast 强校验拦截）**:
+  - 贯彻“绝不做妥协性兜底”指令，`TaskManager.create_task` / `scheduler.submit_task` / `ws_manager.subscribe_queue` / `ws_manager.send_to_client` / `ws_manager.emit_to_client` 全链路强校验；
+  - 凡缺失或空白 `client_id`，**直接抛出 `ValueError` 异常中断后续一切程序执行**；
+  - 彻底铲除 `emit_to_target_or_broadcast` 内部的全网广播兜底与匿名抄送死逻辑，改为纯粹的 `emit_to_client` 精准定向投递，目标离线直接丢弃并打 Warning，严防串台；
+  - HTTP 端点（400）与 WS 握手（1008 Policy Violation）在最前沿一票否决任何无身份请求。
+- **自动化测试与接入文档**:
+  - `test/20261010/test_single_track_queue.py`: 补齐强校验断言及全流程测试，14 个测试全绿；
+  - `docs/下游接入契约.md`: 全面更新 7.1 节多租户原则与 7.2 节消息类型表、7.3 节状态 8 / 状态 9 规范。
+
+---
+
+## [v1.4.0] - 2026-10-10
 
 ### 🎯 JIT 按需延迟素材上传与超时/失联连坐清理机制 (Purge)
 

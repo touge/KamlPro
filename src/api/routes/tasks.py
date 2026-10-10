@@ -37,6 +37,8 @@ async def submit_task(request: Request):
             return error("Missing 'task_type' in form data", 400)
 
         client_id = form.get("client_id") or request.headers.get("x-client-id")
+        if not client_id or not str(client_id).strip():
+            return error("Missing required field 'client_id'. Please specify client_id.", 400)
         asset_status = form.get("asset_status") or "ready"
         required_assets = form.get("required_assets")
         if isinstance(required_assets, str):
@@ -95,6 +97,8 @@ async def submit_task(request: Request):
         task_type = body.get("task_type", "")
         payload = body.get("payload", {})
         client_id = body.get("client_id") or payload.get("client_id") or request.headers.get("x-client-id")
+        if not client_id or not str(client_id).strip():
+            return error("Missing required field 'client_id'. Please specify client_id.", 400)
         payload["client_id"] = client_id
         
         asset_status = body.get("asset_status") or payload.get("asset_status") or "ready"
@@ -343,6 +347,10 @@ async def cancel_task(task_id: str):
     TaskManager.register_abort_event(task_id).set()
     log_cancel_debug(f"abort event registered and set for task_id={task_id}")
 
+    # 🌟 若任务尚未执行（排队中或等待素材），立即从调度器队列移出并唤醒素材看门狗
+    scheduler.remove_from_queue(task_id)
+    scheduler.abort_asset_wait(task_id)
+
     # 2. 如果任务正在运行，根据取消元数据调用对应物理后端的中断接口
     if status == TaskManager.STATUS_RUNNING:
         cancel_metadata = TaskManager.get_cancel_metadata(task_id)
@@ -406,12 +414,23 @@ async def cancel_task(task_id: str):
     TaskManager.update_task(task_id, TaskManager.STATUS_FAILED, {"message": "任务已被用户手动停止"})
 
     # 4. 触发 WebSocket 广播事件（全局 Queue 频道 + 任务专有频道）
-    ws_manager.send(task_id, {"type": "task_failed", "message": "任务已被用户手动停止"})
-    ws_manager.broadcast_queue({
+    # 🌟 动作 C：广播 task_cancelled 契约事件
+    cancel_payload = {
+        "type": "task_cancelled",
+        "task_id": task_id,
+        "message": "任务已被用户手动停止"
+    }
+    ws_manager.send(task_id, cancel_payload)
+    ws_manager.broadcast_queue(cancel_payload)
+
+    # 兼容历史消费方：同时保留 task_failed 广播
+    failed_payload = {
         "type": "task_failed",
         "task_id": task_id,
         "message": "任务已被用户手动停止"
-    })
+    }
+    ws_manager.send(task_id, failed_payload)
+    ws_manager.broadcast_queue(failed_payload)
 
     log.info(f"[API] Task {task_id} cancellation initiated successfully.")
     log_cancel_debug(f"cancel_task complete for task_id={task_id}")

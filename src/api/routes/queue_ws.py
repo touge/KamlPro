@@ -25,6 +25,11 @@ router = APIRouter(tags=["Queue Broadcast"])
 
 @router.websocket("/queue/ws")
 async def queue_websocket(websocket: WebSocket, client_id: Optional[str] = Query(None)):
+    if not client_id or not client_id.strip():
+        log.warning("[QueueWS] Connection rejected: missing required query parameter 'client_id'")
+        await websocket.close(code=1008, reason="Missing required query parameter 'client_id'")
+        return
+
     await websocket.accept()
     ws_id = str(uuid.uuid4())
     ws_manager.subscribe_queue(ws_id, websocket, client_id=client_id)
@@ -38,6 +43,12 @@ async def queue_websocket(websocket: WebSocket, client_id: Optional[str] = Query
         await websocket.send_json({
             "type": "queue_snapshot",
             "data": snapshot,
+        })
+        # 🌟 连上即送第 2 帧：下发轻量顺位映射字典 { task_id: position }，方便客户端即时校准
+        positions = scheduler.get_queue_positions(client_id=client_id)
+        await websocket.send_json({
+            "type": "queue_positions_updated",
+            "data": positions,
         })
     except Exception as e:
         log.warning(f"[QueueWS] Failed to send initial snapshot to {ws_id}: {e}")

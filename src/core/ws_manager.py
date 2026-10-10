@@ -137,16 +137,16 @@ class WebSocketManager:
     # 队列广播与单轨定向推送（全局/多租户通知频道）
     # =========================================================================
 
-    def subscribe_queue(self, ws_id: str, websocket: WebSocket, client_id: Optional[str] = None):
-        """订阅队列广播。ws_id 为连接标识，client_id 为可选的业务客户端身份。"""
+    def subscribe_queue(self, ws_id: str, websocket: WebSocket, client_id: str):
+        """订阅队列广播。ws_id 为连接标识，client_id 为必填的业务客户端身份。无 client_id 直接抛出异常！"""
+        if not client_id or not str(client_id).strip():
+            raise ValueError("[WSManager] Missing required client_id! 严禁匿名订阅 WebSocket 队列。")
         with self._queue_lock:
             self._queue_subscribers[ws_id] = websocket
-            if client_id:
-                self._subscriber_clients[ws_id] = client_id
-                self._client_subscribers[client_id].add(ws_id)
-                self._client_disconnect_times.pop(client_id, None)
-        cid_info = f", client_id='{client_id}'" if client_id else ""
-        log.info(f"[WSManager] Queue subscriber '{ws_id}' connected{cid_info} ({len(self._queue_subscribers)} total)")
+            self._subscriber_clients[ws_id] = client_id
+            self._client_subscribers[client_id].add(ws_id)
+            self._client_disconnect_times.pop(client_id, None)
+        log.info(f"[WSManager] Queue subscriber '{ws_id}' connected, client_id='{client_id}' ({len(self._queue_subscribers)} total)")
 
     def unsubscribe_queue(self, ws_id: str):
         """取消队列广播订阅并清理 client_id 索引。"""
@@ -189,8 +189,10 @@ class WebSocketManager:
             pass
 
     def send_to_client(self, client_id: str, message: dict):
-        """定向推送：仅向特定 client_id 的所有活动 WS 连接发送消息。"""
-        if not self._loop or not client_id:
+        """定向推送：仅向特定 client_id 的所有活动 WS 连接发送消息。无 client_id 直接抛出异常！"""
+        if not client_id or not str(client_id).strip():
+            raise ValueError(f"[WSManager] Missing required client_id when sending message: {message.get('type')}. 严禁无 client_id 投递！")
+        if not self._loop:
             return
         with self._queue_lock:
             ws_ids = list(self._client_subscribers.get(client_id, set()))
@@ -212,15 +214,34 @@ class WebSocketManager:
                 self._send_queue_async(ws_id, ws, message), self._loop
             )
 
-    def emit_to_target_or_broadcast(self, target_client_id: Optional[str], message: dict):
-        """智能路由：若指定了 target_client_id 则定向发送；若未指定则退化为全网广播。"""
-        if target_client_id:
-            self.send_to_client(target_client_id, message)
-        else:
-            self.broadcast_queue(message)
+    def emit_to_client(self, target_client_id: str, message: dict):
+        """精准定向发送给目标客户端。无 client_id 直接抛出异常中断！绝不做任何全网广播兜底！"""
+        if not target_client_id or not str(target_client_id).strip():
+            raise ValueError(f"[WSManager] Missing required client_id when emitting message: {message.get('type')}. 严禁无 client_id 投递，程序中断！")
+        if not self._loop or self._loop.is_closed():
+            return
 
-    def emit_progress_throttled(self, task_id: str, client_id: Optional[str], message: dict, interval: float = 0.3):
-        """单轨进度节流推送：对 ComfyUI 等高频进度以 interval(默认300ms) 为窗口合并下发。"""
+        with self._queue_lock:
+            target_ws_ids = list(self._client_subscribers.get(target_client_id, set()))
+            target_sockets = [(ws_id, self._queue_subscribers[ws_id]) for ws_id in target_ws_ids if ws_id in self._queue_subscribers]
+
+        if not target_sockets:
+            log.warning(f"[WSManager] Target client '{target_client_id}' is offline (0 active WS connections). Message '{message.get('type')}' dropped without fallback.")
+            return
+
+        for ws_id, ws in target_sockets:
+            asyncio.run_coroutine_threadsafe(
+                self._send_queue_async(ws_id, ws, message), self._loop
+            )
+
+    def emit_to_target_or_broadcast(self, target_client_id: str, message: dict):
+        """别名兼容：严格走 emit_to_client，无 client_id 直接抛异常中断，绝不兜底！"""
+        self.emit_to_client(target_client_id, message)
+
+    def emit_progress_throttled(self, task_id: str, client_id: str, message: dict, interval: float = 0.3):
+        """单轨进度节流推送：对 ComfyUI 等高频进度以 interval(默认300ms) 为窗口合并下发。无 client_id 直接抛出异常！"""
+        if not client_id or not str(client_id).strip():
+            raise ValueError(f"[WSManager] Missing required client_id when emitting throttled progress for task {task_id}")
         now = time.time()
         last_time = self._last_progress_time.get(task_id, 0.0)
         progress = message.get("progress", 0)
@@ -228,7 +249,7 @@ class WebSocketManager:
         # 满足时间间隔或进度到达 100% 终态时触发推送
         if (now - last_time >= interval) or (progress >= 100):
             self._last_progress_time[task_id] = now
-            self.emit_to_target_or_broadcast(client_id, message)
+            self.emit_to_client(client_id, message)
 
     def clear_task_progress(self, task_id: str):
         """任务结束时清理节流时间记录"""

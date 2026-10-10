@@ -11,6 +11,7 @@ Kalm 全局任务调度器 (TaskScheduler)
   - 不包含任何业务逻辑——只做排队、分发、透传。
 """
 
+import asyncio
 import threading
 import queue
 import time
@@ -168,7 +169,7 @@ class TaskScheduler:
         # 广播连坐清理通知
         for tid in purged_ids:
             ws_manager.clear_task_progress(tid)
-            ws_manager.emit_to_target_or_broadcast(client_id, {
+            ws_manager.emit_to_client(client_id, {
                 "type": "task_completed",
                 "task_id": tid,
                 "client_id": client_id,
@@ -179,6 +180,7 @@ class TaskScheduler:
                 "next_track_mode": None,
                 "message": reason,
             })
+        self.broadcast_queue_positions()
         return purged_ids
 
     def submit_task(self, task_type: str, task_id: str, payload: Dict[str, Any],
@@ -190,6 +192,9 @@ class TaskScheduler:
         - 云端 API 任务：直接进入并行 ThreadPoolExecutor 并发处理。
         返回 can_stream_immediately: bool，表示该任务是否可以免 WS 握手直接发起流式连接。
         """
+        if not client_id or not str(client_id).strip():
+            raise ValueError(f"[Scheduler] Task {task_id} is missing required client_id! 严禁无 client_id 提交任务，程序中断。")
+
         track_mode = self.task_track_modes.get(task_type, "poll")
         model_name = payload.get("model", "")
 
@@ -222,7 +227,7 @@ class TaskScheduler:
                 can_stream = self.active_cloud_tasks < self.max_concurrent_api_tasks
             
             # 广播入队通知（云端并发无本地队列顺位排队，position=0）
-            ws_manager.emit_to_target_or_broadcast(client_id, {
+            ws_manager.emit_to_client(client_id, {
                 "type": "task_enqueued",
                 "task_id": task_id,
                 "task_type": task_type,
@@ -260,7 +265,7 @@ class TaskScheduler:
         log.info(f"[Scheduler] Task {task_id} ({task_type}) enqueued. Queue size: {q_size}")
         
         # 广播入队通知（携带当前在队列中的排位与资产状态）
-        ws_manager.emit_to_target_or_broadcast(client_id, {
+        ws_manager.emit_to_client(client_id, {
             "type": "task_enqueued",
             "task_id": task_id,
             "task_type": task_type,
@@ -279,6 +284,8 @@ class TaskScheduler:
         云端 API 并发执行线程。
         """
         track_mode = self.task_track_modes.get(task_type, "poll")
+        if not client_id or not str(client_id).strip():
+            raise ValueError(f"[Scheduler] Cloud task {task_id} is missing required client_id! 程序中断。")
         
         # 检查是否需要更新为 STATUS_RUNNING。
         task_info = TaskManager.get_task(task_id)
@@ -287,7 +294,7 @@ class TaskScheduler:
             if output_queue is not None:
                 output_queue.put(None)
             ws_manager.clear_task_progress(task_id)
-            ws_manager.emit_to_target_or_broadcast(client_id, {
+            ws_manager.emit_to_client(client_id, {
                 "type": "task_completed",
                 "task_id": task_id,
                 "task_type": task_type,
@@ -302,18 +309,20 @@ class TaskScheduler:
 
         if task_info and task_info.get("status") == TaskManager.STATUS_QUEUED:
             TaskManager.update_task(task_id, TaskManager.STATUS_RUNNING, {"message": "Cloud task out of queue, starting..."})
+            # 频道 A: 推送至单任务专有临时连接 /interface/tasks/{id}/ws (兼容老版多轨客户端，未连接时不发包)
             ws_manager.send(task_id, {
-                "type": "task_running",
+                "type": "task_started",
                 "status": TaskManager.STATUS_RUNNING,
-                "task_id": task_id
+                "task_id": task_id,
+                "message": "云端 API 任务开始执行"
             })
 
         with self.api_lock:
             self.active_cloud_tasks += 1
             log.info(f"[Scheduler] Cloud API task {task_id} executing. Active: {self.active_cloud_tasks}/{self.max_concurrent_api_tasks}")
 
-        # 广播单轨任务启动通知
-        ws_manager.emit_to_target_or_broadcast(client_id, {
+        # 频道 B: 推送至单轨全局长连接 /interface/queue/ws?client_id={id} (《下游接入契约 V4》新版单轨规范，严格定向)
+        ws_manager.emit_to_client(client_id, {
             "type": "task_started",
             "task_id": task_id,
             "task_type": task_type,
@@ -358,7 +367,7 @@ class TaskScheduler:
             # 清理节流并广播单轨任务完成通知（携带最新终态与产物）
             ws_manager.clear_task_progress(task_id)
             final_task_info = TaskManager.get_task(task_id)
-            ws_manager.emit_to_target_or_broadcast(client_id, {
+            ws_manager.emit_to_client(client_id, {
                 "type": "task_completed",
                 "task_id": task_id,
                 "task_type": task_type,
@@ -391,6 +400,8 @@ class TaskScheduler:
                 task_type = task["type"]
                 task_id = task["id"]
                 client_id = task.get("client_id")
+                if not client_id or not str(client_id).strip():
+                    raise ValueError(f"[Scheduler] Local task {task_id} in queue is missing required client_id! 程序中断。")
                 payload = task["payload"]
                 output_queue = task.get("output_queue")
                 started_event = task.get("started_event")
@@ -432,14 +443,17 @@ class TaskScheduler:
                             next_info["next_task_type"] = next_type
                             next_info["next_track_mode"] = peek.get("track_mode", self.task_track_modes.get(next_type, "poll"))
                         ws_manager.clear_task_progress(task_id)
-                        ws_manager.emit_to_target_or_broadcast(client_id, next_info)
+                        ws_manager.emit_to_client(client_id, next_info)
+                        self.broadcast_queue_positions()
                         continue
 
                     # 2. 按需延迟资产等待 (JIT Asset Whistling)
                     initial_asset_status = task.get("asset_status", "ready")
                     initial_required_assets = task.get("required_assets", [])
                     current_asset_status = task_info.get("asset_status", initial_asset_status) if task_info else initial_asset_status
+                    whistled_assets = False
                     if current_asset_status != "ready":
+                        whistled_assets = True
                         log.info(f"[Scheduler] Task {task_id} requires assets (status='{current_asset_status}'). Whistling task_asset_required...")
                         TaskManager.update_task(task_id, TaskManager.STATUS_AWAITING_ASSETS, {"message": "正在等待客户端上传资产素材"})
                         
@@ -448,7 +462,7 @@ class TaskScheduler:
                             self._asset_events[task_id] = asset_event
 
                         track_mode = task.get("track_mode", self.task_track_modes.get(task_type, "poll"))
-                        ws_manager.emit_to_target_or_broadcast(client_id, {
+                        ws_manager.emit_to_client(client_id, {
                             "type": "task_asset_required",
                             "task_id": task_id,
                             "task_type": task_type,
@@ -459,6 +473,8 @@ class TaskScheduler:
                             "timeout": 30,
                             "message": "轮到您的任务了！请在30秒内上传素材文件以开闸运行",
                         })
+                        # 🌟 唯一时机 1A：任务出队进入素材吹哨，有且仅广播 1 次剩余排队顺位
+                        self.broadcast_queue_positions()
 
                         # 等待客户端响应
                         asset_timeout = yaml_config_loader.get("scheduler.asset_upload_timeout", 30)
@@ -484,22 +500,7 @@ class TaskScheduler:
                         if not uploaded or check_task.get("asset_status") != "ready":
                             reason = f"任务素材上传超时({asset_timeout}s)，已连坐取消所有排队任务"
                             log.warning(f"[Scheduler] Task {task_id} asset upload timed out. Purging client '{client_id}'.")
-                            if client_id:
-                                self.purge_client_tasks(client_id, reason=reason)
-                            else:
-                                TaskManager.update_task(task_id, TaskManager.STATUS_FAILED, {"message": reason})
-                                ws_manager.emit_to_target_or_broadcast(client_id, {
-                                    "type": "task_completed",
-                                    "task_id": task_id,
-                                    "task_type": task_type,
-                                    "client_id": client_id,
-                                    "status": TaskManager.STATUS_FAILED,
-                                    "result": {"message": reason},
-                                    "next_task_id": None,
-                                    "next_task_type": None,
-                                    "next_track_mode": None,
-                                    "message": reason,
-                                })
+                            self.purge_client_tasks(client_id, reason=reason)
                             self.task_queue.task_done()
                             continue
 
@@ -513,19 +514,21 @@ class TaskScheduler:
                     latest_status = TaskManager.get_task(task_id).get("status")
                     if latest_status in (TaskManager.STATUS_QUEUED, TaskManager.STATUS_AWAITING_ASSETS):
                         TaskManager.update_task(task_id, TaskManager.STATUS_RUNNING, {"message": "Local task out of queue, starting..."})
+                        # 频道 A: 推送至单任务专有临时连接 /interface/tasks/{id}/ws (兼容老版多轨客户端，未连接时不发包)
                         ws_manager.send(task_id, {
-                            "type": "task_running",
+                            "type": "task_started",
                             "status": TaskManager.STATUS_RUNNING,
-                            "task_id": task_id
+                            "task_id": task_id,
+                            "message": "本地 GPU 任务开始执行"
                         })
 
                     # 通知流式端点：任务已开始执行
                     if started_event:
                         started_event.set()
 
-                    # 广播任务开始（带 client_id 定向推送）
+                    # 频道 B: 推送至单轨全局长连接 /interface/queue/ws?client_id={id} (《下游接入契约 V4》新版单轨规范，严格定向)
                     track_mode = task.get("track_mode", self.task_track_modes.get(task_type, "poll"))
-                    ws_manager.emit_to_target_or_broadcast(client_id, {
+                    ws_manager.emit_to_client(client_id, {
                         "type": "task_started",
                         "task_id": task_id,
                         "task_type": task_type,
@@ -533,6 +536,9 @@ class TaskScheduler:
                         "track_mode": track_mode,
                         "message": "本地 GPU 任务开始执行",
                     })
+                    # 🌟 唯一时机 1B：任务出队直接起跑，有且仅广播 1 次（若在吹哨时已广播则不再重复广播）
+                    if not whistled_assets:
+                        self.broadcast_queue_positions()
 
                     # 服务管理：大模型任务根据模型动态获取物理微服务名（如 "Ollama"），其他任务从配置表映射
                     if task_type in ("llm", "llm_streaming"):
@@ -578,7 +584,7 @@ class TaskScheduler:
                     next_info["next_task_id"] = peek["id"]
                     next_info["next_task_type"] = next_type
                     next_info["next_track_mode"] = peek.get("track_mode", self.task_track_modes.get(next_type, "poll"))
-                ws_manager.emit_to_target_or_broadcast(client_id, next_info)
+                ws_manager.emit_to_client(client_id, next_info)
 
                 # 标记产出并等待客户端下载完成，才处理下一个任务
                 # auto_start 常驻服务无需等待下载，服务不会关闭
@@ -779,6 +785,102 @@ class TaskScheduler:
                 "active_cloud_tasks": self.active_cloud_tasks,
                 "queue_list": queued_items,
             }
+
+    def get_queue_positions(self, client_id: Optional[str] = None) -> Dict[str, int]:
+        """
+        获取当前排队等待中任务的 1-based 物理排位字典 { task_id: position }。
+        - position: 1 表示排在队伍第 1 位即将开始执行；2 表示前方还有 1 人；以此类推。
+        - 若指定 client_id，则仅返回属于该 client_id 的排队任务映射（保持全局物理顺位）；
+        - 若未指定 client_id，则返回所有排队任务的排位映射。
+        """
+        positions = {}
+        with self.task_queue.mutex:
+            for idx, item in enumerate(self.task_queue.queue, 1):
+                if not isinstance(item, dict):
+                    continue
+                tid = item.get("id")
+                if not tid:
+                    continue
+                item_cid = item.get("client_id")
+                if client_id and item_cid != client_id:
+                    continue
+                positions[tid] = idx
+        return positions
+
+    def broadcast_queue_positions(self):
+        """
+        向所有 WebSocket 队列订阅者广播最新排队顺位流转事件：
+        {
+            "type": "queue_positions_updated",
+            "data": { [task_id]: position }
+        }
+        根据订阅者 client_id 分流隔离，保护隐私并准确保留真实物理顺位。
+        """
+        try:
+            if not ws_manager.loop or ws_manager.loop.is_closed():
+                return
+
+            with ws_manager._queue_lock:
+                subscribers = list(ws_manager._queue_subscribers.items())
+                subscriber_clients = dict(ws_manager._subscriber_clients)
+
+            # 兜底：若无任何 WebSocket 订阅者在线，避免空跑计算与调度
+            if not subscribers:
+                return
+
+            all_positions = self.get_queue_positions(client_id=None)
+            client_positions_cache: Dict[str, Dict[str, int]] = {}
+
+            for ws_id, ws in subscribers:
+                cid = subscriber_clients.get(ws_id)
+                if cid:
+                    if cid not in client_positions_cache:
+                        client_positions_cache[cid] = self.get_queue_positions(client_id=cid)
+                    data = client_positions_cache[cid]
+                else:
+                    data = all_positions
+
+                msg = {
+                    "type": "queue_positions_updated",
+                    "data": data,
+                }
+                asyncio.run_coroutine_threadsafe(
+                    ws_manager._send_queue_async(ws_id, ws, msg), ws_manager.loop
+                )
+        except Exception as e:
+            log.warning(f"[Scheduler] Failed to broadcast queue positions: {e}")
+
+    def remove_from_queue(self, task_id: str) -> bool:
+        """从本地 FIFO 队列中移出指定的排队任务（如被用户手动取消）。若成功移除则触发广播并返回 True。"""
+        import collections
+        if not task_id:
+            return False
+        removed = False
+        with self.task_queue.mutex:
+            remaining = collections.deque()
+            for item in self.task_queue.queue:
+                if isinstance(item, dict) and item.get("id") == task_id:
+                    removed = True
+                else:
+                    remaining.append(item)
+            if removed:
+                removed_count = len(self.task_queue.queue) - len(remaining)
+                self.task_queue.queue = remaining
+                self.task_queue.unfinished_tasks -= removed_count
+        if removed:
+            self.broadcast_queue_positions()
+        return removed
+
+    def abort_asset_wait(self, task_id: str) -> bool:
+        """若任务正在等待素材上传，提前解除等待信号以便调度器快速流转。"""
+        if not task_id:
+            return False
+        with self._asset_events_lock:
+            evt = self._asset_events.get(task_id)
+            if evt:
+                evt.set()
+                return True
+        return False
 
 
 scheduler = TaskScheduler()

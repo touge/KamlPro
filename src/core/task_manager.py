@@ -62,9 +62,11 @@ class TaskManager:
     DEFAULT_TTL_SECONDS = 3600  # 任务结果默认保留 1 小时
 
     @classmethod
-    def create_task(cls, task_type: str, client_id: Optional[str] = None,
+    def create_task(cls, task_type: str, client_id: str,
                     asset_status: str = "ready", required_assets: Optional[list] = None,
                     payload: Optional[Dict[str, Any]] = None) -> str:
+        if not client_id or not str(client_id).strip():
+            raise ValueError("[TaskManager] Missing required client_id! 严禁创建无 client_id 的匿名任务，程序中断。")
         task_id = str(uuid.uuid4())
         with cls._lock:
             cls._tasks[task_id] = {
