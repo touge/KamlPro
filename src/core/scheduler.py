@@ -102,6 +102,10 @@ class TaskScheduler:
         self.api_lock = threading.Lock()
         self.stream_events = {}  # task_id -> {"event": started_event, "queue": output_queue}
 
+        # 资产就绪等待事件池 (task_id -> threading.Event)
+        self._asset_events: Dict[str, threading.Event] = {}
+        self._asset_events_lock = threading.Lock()
+
         # 初始化大模型底座提供商管理器
         from src.core.providers.llm.manager import llm_provider_manager
         log.info(f"[Scheduler] LLM Provider Gateway initialized. Concurrency limit: {self.max_concurrent_api_tasks}")
@@ -119,10 +123,69 @@ class TaskScheduler:
         self.worker_thread.start()
         log.info(f"[Scheduler] Worker thread started. Idle timeout: {self.idle_timeout}s")
 
-    def submit_task(self, task_type: str, task_id: str, payload: Dict[str, Any],
-                    output_queue=None, started_event=None, client_id: Optional[str] = None) -> bool:
+    def notify_asset_ready(self, task_id: str):
+        """客户端通过接口上传完成素材后调用，解除调度器的等待阻塞"""
+        with self._asset_events_lock:
+            event = self._asset_events.get(task_id)
+            if event:
+                event.set()
+                log.info(f"[Scheduler] Asset ready event signaled for task {task_id}")
+
+    def purge_client_tasks(self, client_id: str, reason: str = "客户端失联或超时，任务已连坐清理") -> list:
         """
-        统一提交任务入口。支持双轨分流：
+        连坐清理指定 client_id 的所有排队/等待中任务：
+        1. 调用 TaskManager.purge_client_tasks 批量更新状态为 failed；
+        2. 从 self.task_queue 中剔除对应任务；
+        3. 解除该客户端可能正在等待资产的 event；
+        4. 广播 task_completed (failed) 通知。
+        """
+        if not client_id:
+            return []
+        purged_ids = TaskManager.purge_client_tasks(client_id, reason)
+        if not purged_ids:
+            return []
+        log.warning(f"[Scheduler] Purging {len(purged_ids)} tasks for client '{client_id}': {purged_ids}. Reason: {reason}")
+
+        # 唤醒可能正在等待资产上传的 event，让调度循环能够迅速脱身
+        with self._asset_events_lock:
+            for tid in purged_ids:
+                evt = self._asset_events.get(tid)
+                if evt:
+                    evt.set()
+
+        # 从 task_queue 中剔除属于该 client_id 的未运行任务
+        import collections
+        with self.task_queue.mutex:
+            old_len = len(self.task_queue.queue)
+            remaining = collections.deque(
+                item for item in self.task_queue.queue 
+                if item is not None and item.get("client_id") != client_id
+            )
+            removed_count = old_len - len(remaining)
+            self.task_queue.queue = remaining
+            self.task_queue.unfinished_tasks -= removed_count
+
+        # 广播连坐清理通知
+        for tid in purged_ids:
+            ws_manager.clear_task_progress(tid)
+            ws_manager.emit_to_target_or_broadcast(client_id, {
+                "type": "task_completed",
+                "task_id": tid,
+                "client_id": client_id,
+                "status": TaskManager.STATUS_FAILED,
+                "result": {"message": reason},
+                "next_task_id": None,
+                "next_task_type": None,
+                "next_track_mode": None,
+                "message": reason,
+            })
+        return purged_ids
+
+    def submit_task(self, task_type: str, task_id: str, payload: Dict[str, Any],
+                    output_queue=None, started_event=None, client_id: Optional[str] = None,
+                    asset_status: str = "ready", required_assets: Optional[list] = None) -> bool:
+        """
+        统一提交任务入口。支持双轨分流与 JIT 按需延迟素材：
         - 本地 GPU 任务：进入原本的 FIFO 串行队列。
         - 云端 API 任务：直接进入并行 ThreadPoolExecutor 并发处理。
         返回 can_stream_immediately: bool，表示该任务是否可以免 WS 握手直接发起流式连接。
@@ -167,6 +230,7 @@ class TaskScheduler:
                 "track_mode": track_mode,
                 "queue_position": 0,
                 "total_queued": self.task_queue.qsize(),
+                "asset_status": asset_status,
                 "message": "云端 API 任务已提交，准备执行",
             })
 
@@ -183,18 +247,19 @@ class TaskScheduler:
             # 当队列为空且当前本地 worker 空闲时，本地流式任务也支持免 WS 握手即时建流
             can_stream = self.task_queue.empty() and not self.is_local_busy
 
-        log.info(f"[Scheduler] >>> submit_task (本地 GPU): {task_id} ({task_type}), 当前队列大小={self.task_queue.qsize()}, can_stream_immediately={can_stream}")
+        log.info(f"[Scheduler] >>> submit_task (本地 GPU): {task_id} ({task_type}), asset_status={asset_status}, 当前队列大小={self.task_queue.qsize()}, can_stream_immediately={can_stream}")
         task_item = {
             "type": task_type, "id": task_id, "payload": payload,
             "output_queue": output_queue, "started_event": started_event,
             "track_mode": track_mode, "client_id": client_id,
+            "asset_status": asset_status, "required_assets": required_assets or [],
         }
         self.task_queue.put(task_item)
         q_size = self.task_queue.qsize()
         log.info(f"[Scheduler] >>> submit_task 已入队: {task_id} ({task_type}), 新队列大小={q_size}")
         log.info(f"[Scheduler] Task {task_id} ({task_type}) enqueued. Queue size: {q_size}")
         
-        # 广播入队通知（携带当前在队列中的排位）
+        # 广播入队通知（携带当前在队列中的排位与资产状态）
         ws_manager.emit_to_target_or_broadcast(client_id, {
             "type": "task_enqueued",
             "task_id": task_id,
@@ -203,6 +268,7 @@ class TaskScheduler:
             "track_mode": track_mode,
             "queue_position": q_size,
             "total_queued": q_size,
+            "asset_status": asset_status,
             "message": f"任务已排入队列，前方排队 {q_size - 1} 人" if q_size > 1 else "任务已排入队列，即将出队执行",
         })
         return can_stream
@@ -333,6 +399,15 @@ class TaskScheduler:
 
                 log.info(f"[Scheduler] Processing task {task_id} ({task_type})")
 
+                # 1. 检查客户端离线状态（失联检测）
+                if client_id:
+                    offline_dur = ws_manager.get_client_offline_duration(client_id)
+                    if offline_dur is not None and offline_dur > 30.0:
+                        log.warning(f"[Scheduler] Client '{client_id}' offline for {offline_dur:.1f}s (>30s). Purging client tasks.")
+                        self.purge_client_tasks(client_id, reason="客户端离线超过30秒，任务已连坐清理")
+                        self.task_queue.task_done()
+                        continue
+
                 self.is_local_busy = True
                 try:
                     task_info = TaskManager.get_task(task_id)
@@ -360,8 +435,83 @@ class TaskScheduler:
                         ws_manager.emit_to_target_or_broadcast(client_id, next_info)
                         continue
 
-                    # 如果任务还在排队状态，出队时变更为 RUNNING，并向 WS 广播 task_running 起跑信号
-                    if task_info and task_info.get("status") == TaskManager.STATUS_QUEUED:
+                    # 2. 按需延迟资产等待 (JIT Asset Whistling)
+                    initial_asset_status = task.get("asset_status", "ready")
+                    initial_required_assets = task.get("required_assets", [])
+                    current_asset_status = task_info.get("asset_status", initial_asset_status) if task_info else initial_asset_status
+                    if current_asset_status != "ready":
+                        log.info(f"[Scheduler] Task {task_id} requires assets (status='{current_asset_status}'). Whistling task_asset_required...")
+                        TaskManager.update_task(task_id, TaskManager.STATUS_AWAITING_ASSETS, {"message": "正在等待客户端上传资产素材"})
+                        
+                        asset_event = threading.Event()
+                        with self._asset_events_lock:
+                            self._asset_events[task_id] = asset_event
+
+                        track_mode = task.get("track_mode", self.task_track_modes.get(task_type, "poll"))
+                        ws_manager.emit_to_target_or_broadcast(client_id, {
+                            "type": "task_asset_required",
+                            "task_id": task_id,
+                            "task_type": task_type,
+                            "client_id": client_id,
+                            "track_mode": track_mode,
+                            "required_assets": task_info.get("required_assets", initial_required_assets) if task_info else initial_required_assets,
+                            "upload_url": f"/interface/tasks/{task_id}/assets",
+                            "timeout": 30,
+                            "message": "轮到您的任务了！请在30秒内上传素材文件以开闸运行",
+                        })
+
+                        # 等待客户端响应
+                        asset_timeout = yaml_config_loader.get("scheduler.asset_upload_timeout", 30)
+                        uploaded = asset_event.wait(timeout=asset_timeout)
+
+                        # 防误杀检查：若超时唤醒但处于正在上传中 (STATUS_ASSET_UPLOADING)，给予流式传输宽限期
+                        check_task = TaskManager.get_task(task_id) or {}
+                        if not uploaded and check_task.get("status") == TaskManager.STATUS_ASSET_UPLOADING:
+                            log.info(f"[Scheduler] Task {task_id} is actively uploading files. Extending wait up to 300s...")
+                            uploaded = asset_event.wait(timeout=300)
+                            check_task = TaskManager.get_task(task_id) or {}
+
+                        with self._asset_events_lock:
+                            self._asset_events.pop(task_id, None)
+
+                        # 检查等待期间是否被取消
+                        if check_task.get("status") == TaskManager.STATUS_FAILED:
+                            log.warning(f"[Scheduler] Task {task_id} was cancelled during asset upload wait.")
+                            self.task_queue.task_done()
+                            continue
+
+                        # 超时未上传完成判定
+                        if not uploaded or check_task.get("asset_status") != "ready":
+                            reason = f"任务素材上传超时({asset_timeout}s)，已连坐取消所有排队任务"
+                            log.warning(f"[Scheduler] Task {task_id} asset upload timed out. Purging client '{client_id}'.")
+                            if client_id:
+                                self.purge_client_tasks(client_id, reason=reason)
+                            else:
+                                TaskManager.update_task(task_id, TaskManager.STATUS_FAILED, {"message": reason})
+                                ws_manager.emit_to_target_or_broadcast(client_id, {
+                                    "type": "task_completed",
+                                    "task_id": task_id,
+                                    "task_type": task_type,
+                                    "client_id": client_id,
+                                    "status": TaskManager.STATUS_FAILED,
+                                    "result": {"message": reason},
+                                    "next_task_id": None,
+                                    "next_task_type": None,
+                                    "next_track_mode": None,
+                                    "message": reason,
+                                })
+                            self.task_queue.task_done()
+                            continue
+
+                        # 素材已就绪，合并最新 payload
+                        extra_payload = TaskManager.get_task_payload(task_id)
+                        if extra_payload:
+                            payload.update(extra_payload)
+                        log.info(f"[Scheduler] Task {task_id} assets READY! Proceeding to execution.")
+
+                    # 如果任务还在排队或等待资产状态，正式起跑变更为 RUNNING，并向 WS 广播 task_running 起跑信号
+                    latest_status = TaskManager.get_task(task_id).get("status")
+                    if latest_status in (TaskManager.STATUS_QUEUED, TaskManager.STATUS_AWAITING_ASSETS):
                         TaskManager.update_task(task_id, TaskManager.STATUS_RUNNING, {"message": "Local task out of queue, starting..."})
                         ws_manager.send(task_id, {
                             "type": "task_running",

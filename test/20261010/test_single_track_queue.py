@@ -184,6 +184,109 @@ class TestSingleTrackQueue(unittest.TestCase):
             self.assertIn("data", first_frame)
             self.assertEqual(first_frame["data"]["client_id"], "tester_ws_snap")
 
+    def test_07_jit_asset_upload_flow(self):
+        """测试 7: JIT 素材延迟上传接口与文件回填"""
+        from src.logic.yaml_config_loader import yaml_config_loader
+        import io
+        valid_tokens = yaml_config_loader.get("api_server.tokens", [])
+        token = valid_tokens[0] if valid_tokens else ""
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+
+        client = TestClient(app)
+
+        # 1. 提交轻量任务（不带大文件），标记 asset_status="not_ready"
+        resp = client.post("/interface/tasks/submit", headers=headers, json={
+            "task_type": "comfyui",
+            "client_id": "client_jit_test",
+            "asset_status": "not_ready",
+            "required_assets": ["image"],
+            "payload": {
+                "prompt": "a cute cat"
+            }
+        })
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()["data"]
+        task_id = data["task_id"]
+        self.assertEqual(data["asset_status"], "not_ready")
+
+        task_info = TaskManager.get_task(task_id)
+        self.assertEqual(task_info["asset_status"], "not_ready")
+
+        # 2. 模拟轮到任务后，客户端调用 POST /tasks/{task_id}/assets 补交素材
+        fake_image = io.BytesIO(b"fake image bytes")
+        upload_resp = client.post(
+            f"/interface/tasks/{task_id}/assets",
+            headers=headers,
+            files={"image": ("cat.png", fake_image, "image/png")}
+        )
+        self.assertEqual(upload_resp.status_code, 200)
+        up_data = upload_resp.json()["data"]
+        self.assertEqual(up_data["asset_status"], "ready")
+        self.assertIn("image", up_data["files"])
+
+        # 3. 验证 TaskManager 中状态和 payload 均已动态补齐
+        updated_task = TaskManager.get_task(task_id)
+        self.assertEqual(updated_task["asset_status"], "ready")
+        payload = TaskManager.get_task_payload(task_id)
+        self.assertIn("image_path", payload)
+        self.assertTrue(os.path.exists(payload["image_path"]))
+
+    def test_08_purge_client_tasks_and_queue_removal(self):
+        """测试 8: 连坐清理机制 (purge_client_tasks)"""
+        # 创建属于 client_purge 的 3 个任务
+        t1 = TaskManager.create_task("tts", client_id="client_purge")
+        t2 = TaskManager.create_task("image", client_id="client_purge")
+        t3 = TaskManager.create_task("comfyui", client_id="client_purge")
+        TaskManager.update_task(t1, TaskManager.STATUS_QUEUED)
+        TaskManager.update_task(t2, TaskManager.STATUS_AWAITING_ASSETS)
+        TaskManager.update_task(t3, TaskManager.STATUS_QUEUED)
+
+        # 模拟入队
+        scheduler.task_queue.put({"type": "tts", "id": t1, "client_id": "client_purge", "payload": {}})
+        scheduler.task_queue.put({"type": "image", "id": t2, "client_id": "client_purge", "payload": {}})
+        scheduler.task_queue.put({"type": "comfyui", "id": t3, "client_id": "client_purge", "payload": {}})
+
+        # 执行连坐清理
+        purged = scheduler.purge_client_tasks("client_purge", reason="测试主动清理")
+        self.assertIn(t1, purged)
+        self.assertIn(t2, purged)
+        self.assertIn(t3, purged)
+
+        # 验证任务状态全为 failed
+        for tid in (t1, t2, t3):
+            t = TaskManager.get_task(tid)
+            self.assertEqual(t["status"], TaskManager.STATUS_FAILED)
+            self.assertEqual(t["result"]["message"], "测试主动清理")
+
+        # 验证队列中该 client 的所有任务已被剔除
+        with scheduler.task_queue.mutex:
+            for item in scheduler.task_queue.queue:
+                if item is not None:
+                    self.assertNotEqual(item.get("client_id"), "client_purge")
+
+    def test_09_offline_duration_detection(self):
+        """测试 9: 客户端离线计时器与状态判定"""
+        cid = "client_offline_watcher"
+        mock_ws = MagicMock()
+        mock_ws.send_json = AsyncMock()
+
+        # 未连接过
+        self.assertFalse(ws_manager.is_client_connected(cid))
+        self.assertIsNone(ws_manager.get_client_offline_duration(cid))
+
+        # 连接上线
+        ws_manager.subscribe_queue("ws_off_1", mock_ws, client_id=cid)
+        self.assertTrue(ws_manager.is_client_connected(cid))
+        self.assertEqual(ws_manager.get_client_offline_duration(cid), 0.0)
+
+        # 断开下线
+        ws_manager.unsubscribe_queue("ws_off_1")
+        self.assertFalse(ws_manager.is_client_connected(cid))
+        dur = ws_manager.get_client_offline_duration(cid)
+        self.assertIsNotNone(dur)
+        self.assertGreaterEqual(dur, 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
+

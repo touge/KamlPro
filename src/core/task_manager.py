@@ -53,6 +53,8 @@ class TaskManager:
 
     STATUS_PENDING = "pending"
     STATUS_QUEUED = "queued"
+    STATUS_AWAITING_ASSETS = "awaiting_assets"  # 正在等待客户端上传资产
+    STATUS_ASSET_UPLOADING = "asset_uploading"  # 客户端正在上传中
     STATUS_RUNNING = "running"
     STATUS_SUCCESS = "success"
     STATUS_FAILED = "failed"
@@ -60,13 +62,18 @@ class TaskManager:
     DEFAULT_TTL_SECONDS = 3600  # 任务结果默认保留 1 小时
 
     @classmethod
-    def create_task(cls, task_type: str, client_id: Optional[str] = None) -> str:
+    def create_task(cls, task_type: str, client_id: Optional[str] = None,
+                    asset_status: str = "ready", required_assets: Optional[list] = None,
+                    payload: Optional[Dict[str, Any]] = None) -> str:
         task_id = str(uuid.uuid4())
         with cls._lock:
             cls._tasks[task_id] = {
                 "status": cls.STATUS_PENDING,
                 "task_type": task_type,
                 "client_id": client_id,
+                "asset_status": asset_status,  # "ready" | "not_ready"
+                "required_assets": required_assets or [],
+                "payload": payload or {},
                 "result": {},
                 "created_at": time.time(),
             }
@@ -79,6 +86,22 @@ class TaskManager:
             if task_data:
                 return copy.deepcopy(task_data)
             return {"status": "not_found", "result": None}
+
+    @classmethod
+    def get_task_payload(cls, task_id: str) -> Dict[str, Any]:
+        with cls._lock:
+            task_data = cls._tasks.get(task_id)
+            if not task_data:
+                return {}
+            return copy.deepcopy(task_data.get("payload", {}))
+
+    @classmethod
+    def update_task_payload(cls, task_id: str, new_fields: Dict[str, Any]):
+        with cls._lock:
+            if task_id in cls._tasks:
+                if "payload" not in cls._tasks[task_id]:
+                    cls._tasks[task_id]["payload"] = {}
+                cls._tasks[task_id]["payload"].update(new_fields)
 
     @classmethod
     def list_tasks(cls, client_id: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
@@ -99,6 +122,27 @@ class TaskManager:
                 cls._tasks[task_id]["status"] = status
                 if result is not None:
                     cls._tasks[task_id]["result"] = result
+
+    @classmethod
+    def update_asset_status(cls, task_id: str, asset_status: str):
+        with cls._lock:
+            if task_id in cls._tasks:
+                cls._tasks[task_id]["asset_status"] = asset_status
+
+    @classmethod
+    def purge_client_tasks(cls, client_id: str, reason: str = "客户端失联或超时，任务已连坐清理") -> list:
+        """将归属于 client_id 且未完成（pending, queued, awaiting_assets）的任务批量置为 failed"""
+        if not client_id:
+            return []
+        purged = []
+        with cls._lock:
+            for tid, t in cls._tasks.items():
+                if t.get("client_id") == client_id:
+                    if t.get("status") in (cls.STATUS_PENDING, cls.STATUS_QUEUED, cls.STATUS_AWAITING_ASSETS, cls.STATUS_ASSET_UPLOADING):
+                        t["status"] = cls.STATUS_FAILED
+                        t["result"] = {"message": reason}
+                        purged.append(tid)
+        return purged
 
     @classmethod
     def cleanup_expired(cls, max_age_seconds: int = None):

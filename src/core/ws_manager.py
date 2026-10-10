@@ -39,6 +39,7 @@ class WebSocketManager:
         self._queue_subscribers: Dict[str, WebSocket] = {}  # 队列广播订阅者 (ws_id -> WebSocket)
         self._subscriber_clients: Dict[str, str] = {}       # ws_id -> client_id 反查字典
         self._client_subscribers: Dict[str, Set[str]] = defaultdict(set)  # client_id -> Set[ws_id]
+        self._client_disconnect_times: Dict[str, float] = {} # client_id -> 最后完全断开连接的时间戳
         self._last_progress_time: Dict[str, float] = {}     # task_id -> 上次推送进度的 timestamp
         self._lock = threading.Lock()
         self._queue_lock = threading.Lock()
@@ -127,6 +128,7 @@ class WebSocketManager:
             if client_id:
                 self._subscriber_clients[ws_id] = client_id
                 self._client_subscribers[client_id].add(ws_id)
+                self._client_disconnect_times.pop(client_id, None)
         cid_info = f", client_id='{client_id}'" if client_id else ""
         log.info(f"[WSManager] Queue subscriber '{ws_id}' connected{cid_info} ({len(self._queue_subscribers)} total)")
 
@@ -140,9 +142,29 @@ class WebSocketManager:
                 self._client_subscribers[client_id].discard(ws_id)
                 if not self._client_subscribers[client_id]:
                     del self._client_subscribers[client_id]
+                    self._client_disconnect_times[client_id] = time.time()
 
         if ws and self._loop:
             asyncio.run_coroutine_threadsafe(self._close_queue_ws(ws_id, ws), self._loop)
+
+    def is_client_connected(self, client_id: str) -> bool:
+        """检查特定 client_id 当前是否有任何活跃的 WebSocket 连接"""
+        if not client_id:
+            return False
+        with self._queue_lock:
+            return bool(self._client_subscribers.get(client_id))
+
+    def get_client_offline_duration(self, client_id: str) -> Optional[float]:
+        """获取特定 client_id 的离线持续时间(秒)。若当前在线则返回 0.0；若从未连接则返回 None。"""
+        if not client_id:
+            return None
+        with self._queue_lock:
+            if bool(self._client_subscribers.get(client_id)):
+                return 0.0
+            dis_time = self._client_disconnect_times.get(client_id)
+            if dis_time is not None:
+                return time.time() - dis_time
+            return None
 
     async def _close_queue_ws(self, ws_id: str, ws: WebSocket):
         try:

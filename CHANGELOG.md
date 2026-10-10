@@ -2,6 +2,33 @@
 
 ## [Unreleased] - 2026-10-10
 
+### 🎯 JIT 按需延迟素材上传与超时/失联连坐清理机制 (Purge)
+
+彻底解决大文件任务（视频/音频等）批量提交挤爆服务端磁盘与网络带宽，以及客户端意外离线/超时空耗 GPU 算力的痛点：
+
+- **`src/core/task_manager.py`**:
+  - 任务状态扩展：新增 `STATUS_AWAITING_ASSETS`（等待客户端上传资产）与 `STATUS_ASSET_UPLOADING`（上传中传输保护）。
+  - 任务资产元数据：支持 `asset_status`（"ready" / "not_ready"）与 `required_assets` 声明。
+  - Payload 动态合并：新增 `get_task_payload()` 与 `update_task_payload()`，支持按需注入上传文件路径。
+  - 连坐清理核心：新增 `purge_client_tasks(client_id)`，批量取消指定客户端所有未完成任务。
+- **`src/core/ws_manager.py`**:
+  - 客户端离线检测：新增 `_client_disconnect_times`，实现 `is_client_connected()` 与 `get_client_offline_duration()` 离线秒数统计。
+- **`src/core/scheduler.py`**:
+  - 资产就绪事件池：新增 `_asset_events` 与 `notify_asset_ready()`。
+  - 调度吹哨等待：当任务轮到且 `asset_status != "ready"` 时，向单轨 WS 发送 `task_asset_required` 吹哨广播并阻塞等待 30 秒。
+  - 防误杀 Watchdog：若客户端正在上传中（`asset_uploading`），自动延长等待至 300 秒，保证大文件完整传输不被误杀。
+  - 连坐清理联动：吹哨超时未响应或客户端断开 WS 超过 30 秒时，调用 `purge_client_tasks()` 连坐清理排队任务，拒绝浪费 GPU。
+- **`src/api/routes/tasks.py`**:
+  - `POST /tasks/submit`: 支持 `asset_status="not_ready"` 与 `required_assets` 声明，轻量化入队。
+  - `POST /tasks/{task_id}/assets`: 新增按需素材补交接口，接收 `multipart/form-data`，落盘保存至 `tasks/{id}/`，动态回填 payload 并解除调度器等待。
+- **自动化测试与接入文档**:
+  - `test/20261010/test_single_track_queue.py`: 新增 JIT 延迟素材上传流程、连坐清理及离线判定 3 个集成测试用例（9/9 100% 通过）。
+  - `docs/下游接入契约.md`: 增加第 12 节详细规约与时序图。
+
+---
+
+## [v1.2.0] - 2026-10-10
+
 ### 🚀 全局单轨 WebSocket 架构与队列大盘感知机制
 
 彻底收敛任务状态追踪为“单轨机制”，解决双轨 WS 连接泄露与状态打架痛点，提供 100% 向下兼容的商业级单轨体验。

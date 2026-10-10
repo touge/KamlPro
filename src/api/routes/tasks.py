@@ -37,13 +37,22 @@ async def submit_task(request: Request):
             return error("Missing 'task_type' in form data", 400)
 
         client_id = form.get("client_id") or request.headers.get("x-client-id")
+        asset_status = form.get("asset_status") or "ready"
+        required_assets = form.get("required_assets")
+        if isinstance(required_assets, str):
+            try:
+                required_assets = json.loads(required_assets)
+            except Exception:
+                required_assets = [required_assets]
+        elif not required_assets:
+            required_assets = []
 
         # 收集所有非文件字段为 payload
         payload: Dict[str, Any] = {}
         saved_files: Dict[str, str] = {}  # field_name → local_path
 
         for field_name, value in form.items():
-            if field_name in ("task_type", "client_id"):
+            if field_name in ("task_type", "client_id", "asset_status", "required_assets"):
                 continue
             if hasattr(value, "filename"):
                 # 文件字段：保存到任务目录
@@ -59,7 +68,10 @@ async def submit_task(request: Request):
                 payload[field_name] = value
 
         payload["client_id"] = client_id
-        task_id = TaskManager.create_task(task_type, client_id=client_id)
+        task_id = TaskManager.create_task(
+            task_type, client_id=client_id, asset_status=asset_status,
+            required_assets=required_assets, payload=payload
+        )
 
         # 将上传文件保存到任务目录
         task_dir = TASK_FOLDER / task_id
@@ -69,6 +81,9 @@ async def submit_task(request: Request):
             file_path.write_bytes(finfo["content"])
             payload[f"{field_name}_path"] = str(file_path)
             log.info(f"[API] Saved uploaded file: {file_path} ({len(finfo['content'])} bytes)")
+
+        # 同步回写带有文件路径的 payload
+        TaskManager.update_task_payload(task_id, payload)
 
     # ---- JSON（普通任务）----
     else:
@@ -81,12 +96,21 @@ async def submit_task(request: Request):
         payload = body.get("payload", {})
         client_id = body.get("client_id") or payload.get("client_id") or request.headers.get("x-client-id")
         payload["client_id"] = client_id
-        log.info(f"[API] 客户端原始请求: task_type='{task_type}', client_id='{client_id}', payload keys={list(payload.keys())}")
+        
+        asset_status = body.get("asset_status") or payload.get("asset_status") or "ready"
+        required_assets = body.get("required_assets") or payload.get("required_assets") or []
+        if isinstance(required_assets, str):
+            required_assets = [required_assets]
+
+        log.info(f"[API] 客户端原始请求: task_type='{task_type}', client_id='{client_id}', asset_status='{asset_status}', payload keys={list(payload.keys())}")
 
         if not task_type:
             return error("Missing 'task_type' in request body", 400)
 
-        task_id = TaskManager.create_task(task_type, client_id=client_id)
+        task_id = TaskManager.create_task(
+            task_type, client_id=client_id, asset_status=asset_status,
+            required_assets=required_assets, payload=payload
+        )
 
     # ---- 提交到调度器 ----
     internal_type = TYPE_ALIASES.get(task_type, task_type)
@@ -95,8 +119,11 @@ async def submit_task(request: Request):
         return error(f"Unknown task type: '{task_type}'. Known types: {known_types}", 400)
 
     try:
-        log.info(f"[API] >>> submit_task 调用前: type={internal_type}, task_id={task_id}, client_id={client_id}")
-        can_stream_immediately = scheduler.submit_task(internal_type, task_id, payload, client_id=client_id)
+        log.info(f"[API] >>> submit_task 调用前: type={internal_type}, task_id={task_id}, client_id={client_id}, asset_status={asset_status}")
+        can_stream_immediately = scheduler.submit_task(
+            internal_type, task_id, payload, client_id=client_id,
+            asset_status=asset_status, required_assets=required_assets
+        )
         log.info(f"[API] >>> submit_task 返回后: type={internal_type}, task_id={task_id}, can_stream={can_stream_immediately}")
         
         # 闲时直连则直接变更为 RUNNING，否则进入 QUEUED 状态排队
@@ -116,6 +143,7 @@ async def submit_task(request: Request):
             "task_id": task_id,
             "client_id": client_id,
             "status": TaskManager.STATUS_RUNNING if can_stream_immediately else TaskManager.STATUS_QUEUED,
+            "asset_status": asset_status,
             "track_mode": track_mode,
             "hint": hint,
         }
@@ -127,6 +155,70 @@ async def submit_task(request: Request):
         log.error(f"[API] Failed to submit task: {e}")
         TaskManager.update_task(task_id, TaskManager.STATUS_FAILED, {"message": str(e)})
         return error(f"Failed to submit task: {str(e)}", 500)
+
+
+@router.post("/tasks/{task_id}/assets")
+async def upload_task_assets(task_id: str, request: Request):
+    """
+    按需延迟上传资产端点（JIT 素材注入接口）。
+    当任务轮到并收到 task_asset_required 广播后，客户端调用本端点上传素材。
+    接收 multipart/form-data，保存至 tasks/{task_id}/，回填至任务 payload，通知调度器开闸。
+    """
+    task = TaskManager.get_task(task_id)
+    if task.get("status") == "not_found":
+        return error(f"Task '{task_id}' not found", 404)
+
+    if task.get("status") in (TaskManager.STATUS_SUCCESS, TaskManager.STATUS_FAILED):
+        return error(f"Task '{task_id}' has already finished with status '{task.get('status')}'", 400)
+
+    # 标记状态为正在上传，防止 30s 调度器超时误杀
+    TaskManager.update_task(task_id, TaskManager.STATUS_ASSET_UPLOADING, {"message": "资产素材上传中..."})
+
+    content_type = request.headers.get("content-type", "")
+    if "multipart/form-data" not in content_type:
+        return error("Content-Type must be multipart/form-data for uploading assets", 400)
+
+    try:
+        form = await request.form()
+        task_dir = TASK_FOLDER / task_id
+        task_dir.mkdir(parents=True, exist_ok=True)
+
+        new_payload_fields: Dict[str, Any] = {}
+        saved_files: Dict[str, str] = {}
+
+        for field_name, value in form.items():
+            if hasattr(value, "filename") and value.filename:
+                filename = value.filename
+                ext = Path(filename).suffix or ".bin"
+                # 保存文件
+                file_path = task_dir / f"{field_name}{ext}"
+                content = await value.read()
+                file_path.write_bytes(content)
+                new_payload_fields[f"{field_name}_path"] = str(file_path)
+                saved_files[field_name] = str(file_path)
+                log.info(f"[API] Asset uploaded for task {task_id}: {field_name} -> {file_path} ({len(content)} bytes)")
+            else:
+                new_payload_fields[field_name] = value
+
+        if not saved_files and not new_payload_fields:
+            return error("No assets or fields provided in request", 400)
+
+        # 更新任务 payload 与资产状态
+        TaskManager.update_task_payload(task_id, new_payload_fields)
+        TaskManager.update_asset_status(task_id, "ready")
+
+        # 解除调度器等待
+        scheduler.notify_asset_ready(task_id)
+
+        log.info(f"[API] Task {task_id} assets successfully uploaded and marked ready. Files: {list(saved_files.keys())}")
+        return success(message="Assets uploaded successfully and task released", data={
+            "task_id": task_id,
+            "asset_status": "ready",
+            "files": saved_files,
+        })
+    except Exception as e:
+        log.error(f"[API] Failed to upload assets for task {task_id}: {e}", exc_info=True)
+        return error(f"Failed to process asset upload: {str(e)}", 500)
 
 
 def _track_hint(mode: str, task_id: str) -> str:
