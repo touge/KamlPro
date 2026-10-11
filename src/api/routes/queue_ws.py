@@ -59,10 +59,10 @@ async def queue_websocket(websocket: WebSocket, client_id: Optional[str] = Query
             data = await websocket.receive_text()
             if data == "ping":
                 if yaml_config_loader.get("app.debug", False):
-                    log.info(f"[WS Send] [Queue: {ws_id}] pong", extra={"markup": False})
+                    log.info(f"[WS Send] [Queue: {ws_id} | client: {client_id}] pong", extra={"markup": False})
                 await websocket.send_text("pong")
     except Exception:
         pass
     finally:
         ws_manager.unsubscribe_queue(ws_id)
-        log.info(f"[QueueWS] Subscriber '{ws_id}' disconnected")
+        log.info(f"[QueueWS] Subscriber '{ws_id}' (client_id='{client_id}') disconnected")

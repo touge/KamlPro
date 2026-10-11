@@ -560,9 +560,69 @@ class TestSingleTrackQueue(unittest.TestCase):
         finally:
             ws_manager.unsubscribe_queue("ws_cancel_test")
 
+    def test_15_comfyui_progress_monotonic_no_rollback(self):
+        """测试 15: ComfyUI 生图单轨任务进度单调递增保障，杜绝单节点局部 step 倒退冲垮全局 task_progress"""
+        from src.core.executors.image import execute as execute_image
+        from unittest.mock import patch, MagicMock
+
+        mock_ws = MagicMock()
+        mock_ws.send_json = AsyncMock()
+        ws_manager.subscribe_queue("ws_mono_test", mock_ws, client_id="client_mono")
+
+        try:
+            # 模拟 ComfyUI provider 执行过程中的回调序列：
+            # 1. 节点 171 (前置处理) 采样完成：原生 progress: 2/2 -> 100%
+            # 2. 拦截器合成：overall_progress: 50%
+            # 3. 节点 178 (主干生成) 采样开始：原生 progress: 0/50 -> 0% (若未拦截会导致进度条回跳)
+            # 4. 拦截器合成：overall_progress: 95%
+            # 5. 任务终态：overall_progress: 100%
+            mock_provider = MagicMock()
+            def fake_generate_image(payload, progress_cb):
+                # 节点 171 局部 100%
+                progress_cb({"type": "progress", "data": {"value": 2, "max": 2, "node": "171"}})
+                # 全局 overall_progress 50%
+                progress_cb({"type": "overall_progress", "data": {"percent": 50, "node": "171", "message": "执行中 (50%)"}})
+                import time
+                time.sleep(0.35)
+                # 节点 178 局部 0% (测试验证其被成功过滤，绝不触发回跳)
+                progress_cb({"type": "progress", "data": {"value": 0, "max": 50, "node": "178"}})
+                # 全局 overall_progress 95%
+                progress_cb({"type": "overall_progress", "data": {"percent": 95, "node": "178", "message": "执行中 (95%)"}})
+                # 全局终态 100% (触发无延迟强制放行)
+                progress_cb({"type": "overall_progress", "data": {"percent": 100, "node": "178", "message": "执行完成 (100%)"}})
+                return {"178": {"gifs": [{"filename": "out.mp4"}]}}
+
+            mock_provider.generate_image.side_effect = fake_generate_image
+
+            with patch("src.core.providers.image.manager.image_provider_manager.get_provider", return_value=mock_provider):
+                execute_image(
+                    "mono_task_01",
+                    workflow={"171": {}, "178": {}},
+                    final_output_node_id="178",
+                    client_id="client_mono",
+                    provider="comfyui"
+                )
+
+            self.loop.run_until_complete(asyncio.sleep(0.01))
+            task_progress_msgs = [
+                call.args[0] for call in mock_ws.send_json.call_args_list
+                if call.args[0].get("type") == "task_progress"
+            ]
+
+            # 验证收到的 task_progress 进度值列表
+            progress_values = [m["progress"] for m in task_progress_msgs]
+            # 必须严格单调递增，绝不允许出现 [100, 50, 0, 95, 100] 的倒退回跳！
+            self.assertEqual(progress_values, [50, 95, 100])
+            self.assertEqual(task_progress_msgs[0]["node_name"], "171")
+            self.assertEqual(task_progress_msgs[1]["node_name"], "178")
+        finally:
+            ws_manager.clear_task_progress("mono_task_01")
+            ws_manager.unsubscribe_queue("ws_mono_test")
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

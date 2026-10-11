@@ -12,14 +12,16 @@
   - 新增 `remove_from_queue(task_id)` 与 `abort_asset_wait(task_id)`：支持排队中或等待素材中的任务被取消时即时移出 FIFO 队列并触发广播 `task_cancelled`。
 - **出队生命周期与进度事件规范统一**:
   - 移除出队时的多余历史事件 `task_running`，统一只下发标准的 `type: "task_started"`；
-  - 全局单轨长连接（`/queue/ws`）统一度量衡进度为 `type: "task_progress"`（300ms 智能节流防洪），指导下游彻底摒弃杂乱的旧单任务连接及底层私有报文（`progress` / `overall_progress`）。
+  - 全局单轨长连接（`/queue/ws`）统一度量衡进度为 `type: "task_progress"`（300ms 智能节流防洪），指导下游彻底摒弃杂乱的旧单任务连接及底层私有报文（`progress` / `overall_progress`）；
+  - **ComfyUI 单轨全局进度单调递增保障**：在 `src/core/executors/image.py` 中彻底隔离 ComfyUI 单节点局部 step 步数（`progress`），单轨 `task_progress` 严格收敛由 `src/logic/comfy_progress_interceptor.py` 高水位加权合成的 `overall_progress` 驱动，并将当前执行节点 `node` 注入进度报文，彻底杜绝复杂多采样器工作流中“前置节点 100% 后跳崖回 0%”的严重进度回退 Bug；
+  - **进度数值变动去重拦截（Deduplication）与日志可读性升级**：在 `src/core/ws_manager.py` 的 `emit_progress_throttled` 中增加状态检测，进度未变动时（如连续处于 96%）直接静默拦截，杜绝高频相同数值疯狂广播；同时在 `[WS Send] pong`、`[WS Broadcast]` 与 `[QueueWS]` 断开日志中透传输出所属 `client_id`，极大方便实时监控与排错。
 - **严格零兜底原则（Fail-Fast 强校验拦截）**:
   - 贯彻“绝不做妥协性兜底”指令，`TaskManager.create_task` / `scheduler.submit_task` / `ws_manager.subscribe_queue` / `ws_manager.send_to_client` / `ws_manager.emit_to_client` 全链路强校验；
   - 凡缺失或空白 `client_id`，**直接抛出 `ValueError` 异常中断后续一切程序执行**；
   - 彻底铲除 `emit_to_target_or_broadcast` 内部的全网广播兜底与匿名抄送死逻辑，改为纯粹的 `emit_to_client` 精准定向投递，目标离线直接丢弃并打 Warning，严防串台；
   - HTTP 端点（400）与 WS 握手（1008 Policy Violation）在最前沿一票否决任何无身份请求。
 - **自动化测试与接入文档**:
-  - `test/20261010/test_single_track_queue.py`: 补齐强校验断言及全流程测试，14 个测试全绿；
+  - `test/20261010/test_single_track_queue.py`: 补齐强校验断言、进度单调性保障及全流程测试，15 个测试全绿；
   - `docs/下游接入契约.md`: 全面更新 7.1 节多租户原则与 7.2 节消息类型表、7.3 节状态 8 / 状态 9 规范。
 
 ---

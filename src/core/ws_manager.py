@@ -41,6 +41,7 @@ class WebSocketManager:
         self._client_subscribers: Dict[str, Set[str]] = defaultdict(set)  # client_id -> Set[ws_id]
         self._client_disconnect_times: Dict[str, float] = {} # client_id -> 最后完全断开连接的时间戳
         self._last_progress_time: Dict[str, float] = {}     # task_id -> 上次推送进度的 timestamp
+        self._last_progress_state: Dict[str, tuple[int, str]] = {} # task_id -> (progress, node_name) 状态记录
         self._lock = threading.Lock()
         self._queue_lock = threading.Lock()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -245,22 +246,33 @@ class WebSocketManager:
         now = time.time()
         last_time = self._last_progress_time.get(task_id, 0.0)
         progress = message.get("progress", 0)
-        
+        node_name = str(message.get("node_name") or "")
+
+        # 🌟 进度数值去重：当进度未到达 100% 且 (progress, node_name) 完全未发生变动时，直接静默拦截，杜绝同一数值疯狂刷屏！
+        last_state = self._last_progress_state.get(task_id)
+        current_state = (progress, node_name)
+        if progress < 100 and last_state == current_state:
+            return
+
         # 满足时间间隔或进度到达 100% 终态时触发推送
         if (now - last_time >= interval) or (progress >= 100):
             self._last_progress_time[task_id] = now
+            self._last_progress_state[task_id] = current_state
             self.emit_to_client(client_id, message)
 
     def clear_task_progress(self, task_id: str):
-        """任务结束时清理节流时间记录"""
+        """任务结束时清理节流时间记录与去重状态"""
         self._last_progress_time.pop(task_id, None)
+        self._last_progress_state.pop(task_id, None)
         self._last_progress_time.pop(f"single_{task_id}_progress", None)
         self._last_progress_time.pop(f"single_{task_id}_overall_progress", None)
 
     async def _send_queue_async(self, ws_id: str, ws: WebSocket, message: dict):
         try:
             if yaml_config_loader.get("app.debug", False):
-                log.info(f"[WS Broadcast] [{ws_id}] {json.dumps(message, ensure_ascii=False)}", extra={"markup": False})
+                with self._queue_lock:
+                    client_id = self._subscriber_clients.get(ws_id, "unknown")
+                log.info(f"[WS Broadcast] [{ws_id} | client: {client_id}] {json.dumps(message, ensure_ascii=False)}", extra={"markup": False})
             await ws.send_json(message)
         except Exception:
             log.warning(f"[WSManager] Failed to broadcast to queue subscriber {ws_id}, disconnecting")

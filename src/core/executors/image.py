@@ -45,20 +45,24 @@ def execute(task_id: str, **payload):
             node_name = None
             message_text = None
 
-            # 精准解析 ComfyUI 的 overall_progress 或 progress 报文
+            # 单轨全局总线 task_progress 解析：
+            # 对于 ComfyUI，进度必须由 overall_progress（高水位锁与拓扑加权）单调下发，
+            # 严禁将底层单节点的局部步数（progress）作为任务总进度，否则多采样器工作流会导致进度倒退回跳！
             if msg_type == "overall_progress":
                 progress_val = data.get("percent")
                 message_text = data.get("message")
-            elif msg_type == "progress":
-                val = data.get("value", 0)
-                max_val = data.get("max", 1)
-                node_name = data.get("node")
-                if max_val > 0:
-                    progress_val = int((val / max_val) * 100)
-            elif "percent" in raw_message:
-                progress_val = raw_message.get("percent")
-            elif "progress" in raw_message:
-                progress_val = raw_message.get("progress")
+                node_name = data.get("node") or data.get("node_name")
+            elif provider_type != "comfyui":
+                if msg_type == "progress":
+                    val = data.get("value", 0)
+                    max_val = data.get("max", 1)
+                    node_name = data.get("node")
+                    if max_val > 0:
+                        progress_val = int((val / max_val) * 100)
+                elif "percent" in raw_message:
+                    progress_val = raw_message.get("percent")
+                elif "progress" in raw_message:
+                    progress_val = raw_message.get("progress")
 
             # 仅在获取到有效百分比时触发单轨 300ms 节流推送
             if progress_val is not None:

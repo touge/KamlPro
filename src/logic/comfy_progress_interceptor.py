@@ -11,6 +11,7 @@ class ComfyProgressInterceptor:
         self.total = total_nodes
         self.executed_nodes = set()
         self.max_percent = 0.0
+        self.current_node = None
 
     def __call__(self, data):
         msg_type = data.get("type", "")
@@ -22,18 +23,23 @@ class ComfyProgressInterceptor:
             node_id = data.get("data", {}).get("node")
             if node_id:
                 self.executed_nodes.add(node_id)
+                self.current_node = str(node_id)
                 should_update_progress = True
         elif msg_type == "execution_cached":
             nodes = data.get("data", {}).get("nodes", [])
             if nodes:
                 for node_id in nodes:
                     self.executed_nodes.add(node_id)
+                self.current_node = str(nodes[-1])
                 should_update_progress = True
                 
-        # 透传原始事件以保证后向兼容性
+        # 透传原始事件以保证后向兼容性（旧单任务 WS 仍可收取原始事件）
         self.callback(data)
         
         if msg_type == "progress":
+            node_id = data.get("data", {}).get("node")
+            if node_id:
+                self.current_node = str(node_id)
             val = data.get("data", {}).get("value", 0)
             max_val = data.get("data", {}).get("max", 1)
             current_sub = val / max_val if max_val > 0 else 0
@@ -57,6 +63,7 @@ class ComfyProgressInterceptor:
                 "type": "overall_progress",
                 "data": {
                     "percent": final_pct,
+                    "node": self.current_node,
                     "message": f"执行中 ({final_pct}%)"
                 }
             })
