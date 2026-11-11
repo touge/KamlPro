@@ -1,5 +1,38 @@
 # Changelog
 
+## [v1.5.0] - 2026-11-11
+
+### 🎙️ TTS 常驻零显存改造、GPU 推理子进程隔离与全方法透明代理 (`/proxy/{service_name}/...`)
+
+彻底消除“网关绑定 TTS 业务路由”与“TTS 常驻占用显存/关闭导致管理与试听 502”之间的架构矛盾，打通前端零耦合透明代理与单卡显存 100% 物理回收闭环：
+
+- **KamlPro 全方法透明代理与试听鉴权 (`src/api/routes/file_proxy.py`, `src/core/security.py`, `src/api/main.py`)**:
+  - **新增通用代理端点**：`/proxy/{service_name}` 与 `/proxy/{service_name}/{path:path}`，完整支持 `GET / HEAD / POST / PUT / DELETE / PATCH` 方法及 Query 参数、Request Body（JSON / `multipart/form-data` / 二进制）、`Range` / `206 Partial Content` 响应头透传，自动跟随后端尾部斜杠 `307` 重定向（`follow_redirects=True`），并拆分独立端点函数（Swagger `/docs` 仅展示常用 `GET/POST/PUT/DELETE` 避免 `operationId` 冲突与空路径参数混淆），自动清洗浏览器跨域头与代填后端 `Authorization` Token；
+  - **双模式试听鉴权 (`require_proxy_token`)**：全部代理请求支持 `Authorization: Bearer <token>` 请求头；对 `GET / HEAD` 额外兼容 `?token=<token>` 查询参数（转发给下游前自动剥离网关 `token` 参数），兼顾原生 `<audio src="...?token=...">` / `<video>` 直连试听与写操作（`POST/PUT/DELETE/PATCH`）禁传 Query Token 的安全边界；
+  - **跨事件循环连接池修复**：使用 `WeakKeyDictionary[AbstractEventLoop, httpx.AsyncClient]` 按事件循环隔离异步客户端并配置 `trust_env=False`，解决多 Loop / `TestClient` 切换场景下的 `Event loop is closed` 异常与本地代理劫持问题；
+  - **向后兼容保留**：原有 `/file/{service_name}/{file_path:path}` 与 `/interface/tts/speakers`（`src/api/routes/speaker.py`）完整保留。
+- **TTS 调度常驻化、`free_api` 鉴权与单轨进度增强 (`configs/services.yaml`, `src/core/scheduler.py`, `src/core/executors/tts.py`, `src/core/executors/subtitle.py`)**:
+  - `configs/services.yaml` 中 `TTS` 服务调整为 `auto_start: true`，并新增 `free_api`（`POST /free`, `unload_models: true, free_memory: true`）；
+  - 修复 `TaskScheduler._free_service_resources()` 在调用 `free_api` 时未携带下游服务 `token` 的缺陷，自动附加 `Authorization: Bearer <token>` 请求头；
+  - `tts.py` 与 `subtitle.py` 执行器增强单轨进度提取逻辑，兼容顶层 `progress`、`data.progress` 与分段进度 `current_chunk / total_chunks` 自动换算并节流推送 `task_progress`。
+- **IndexTTS-API 轻量化常驻与 GPU Worker 子进程隔离 (`D:\AIGC\Background_Tasks\IndexTTS-API`)**:
+  - **新增 `app/core/inference_worker.py` (`WorkerProcessManager`, `worker_main`)**：通过 `multiprocessing.get_context("spawn")` 将所有 PyTorch / IndexTTS V1.5 / IndexTTS2 V2.0 / Faster-Whisper 加载与推理彻底隔离到独立子进程中；FastAPI Web 主进程永不导入 `torch`、永不初始化 CUDA（**0 MB 显存常驻**），随时响应 `/speaker/*`、`/emo/*`、`/static/*`、`/files/*`、`/download/*`；
+  - **按配置可控加载 (`config.yaml` `tts.model`)**：新增 `enabled_versions`（控制允许加载的模型版本）、`preload_version`（默认 `null`，启动不预加载）、`subtitle_enabled`、`idle_unload_seconds`（默认 15s 空闲回收）；未配置启用的模型请求在入队前直接返回 `400` 拦截，不拉起子进程；
+  - **显存物理归零、物理取消与数值进度 (`app/core/queue_manager.py`, `app/api/task_routes.py`, `app/api/schemas.py`, `v1_5/routes.py`, `v2_0/routes.py`, `subtitle_routes.py`, `app/api/main.py`)**：
+    - 新增 `POST /free`：空闲时立即退出/销毁 GPU Worker 子进程，由操作系统 100% 物理回收显存与 CUDA Context（运行中则标记队列清空后立即销毁）；
+    - 新增 `POST /cancel/{task_id}`：排队任务直接标记中止，运行中任务直接终止 GPU Worker 子进程释放 GPU；
+    - 新增 `GET /model/status` 与 `POST /model/config`：支持查询 Worker 存活状态、已加载版本，并在运行时动态调整策略或显式按需 `load` / `unload`；
+    - 新增规范复数列表路由 `GET /speakers` 与 `GET /emotions`（同时兼容简写 `GET /emos`，免末尾斜杠），并将旧单数列表路由 `GET /speaker/`、`GET /emo/` 标记为 `deprecated=True` 保留兼容（其余子路由及 KamlPro `src/api/routes/speaker.py` 已切往 `/speakers`）；
+    - `GET /status/{task_id}`（`TaskStatusResponse` & `TaskData`）补充数值化 `progress`（0-100）与分段进度描述 `message`。
+- **详细运行时日志完善**:
+  - `src/api/routes/file_proxy.py` 与 `src/core/security.py` 补全全方法代理出入参摘要、Range / `query_token` 剥离标记、异常状态响应及鉴权拦截日志；
+  - `D:\AIGC\Background_Tasks\IndexTTS-API\app\api\task_routes.py` 与 `inference_worker.py` 补全 `/free`、`/cancel`、`/model/config`、Worker 启停 PID 与模型加载/卸载日志。
+- **测试与文档**:
+  - 新增 `test/20261111/test_proxy_and_tts_integration.py`（5/5 通过）、`D:\AIGC\Background_Tasks\IndexTTS-API\tester\test_worker_isolation_and_lifecycle.py`（7/7 通过）、`test/20261111/test_speaker_on_demand.py` 回归（6/6 通过）及跨进程实机联动冒烟测试；
+  - 更新 `README.md` 与 `docs/下游接入契约.md`，新增完整接入文档 `docs/TTS与透明代理服务前端接入指南.md`。
+
+---
+
 ## [v1.4.1] - 2026-10-11
 
 ### ⚡ 队列顺位轻量广播精简、严格零兜底强校验与单轨全生命周期标准收敛

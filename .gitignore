@@ -195,3 +195,6 @@ test/file/*.wav
 test/file/*.mp3
 test/file/*.srt
 test/comfyui/files/
+
+# Temporary reference projects
+temp/

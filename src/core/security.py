@@ -35,6 +35,7 @@ class OptionalHTTPBearer(HTTPBearer):
 
 
 security_scheme = OptionalHTTPBearer(auto_error=True)
+proxy_security_scheme = OptionalHTTPBearer(auto_error=False)
 
 
 async def require_token(
@@ -59,6 +60,37 @@ async def require_token(
     if credentials.credentials not in tokens:
         raise HTTPException(status_code=401, detail="Invalid authentication token")
     return True
+
+
+async def require_proxy_token(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Security(proxy_security_scheme),
+):
+    """
+    透明代理路由认证依赖：
+    - 优先验证标准 Authorization: Bearer <token> 请求头；
+    - 对于 GET / HEAD 请求（如浏览器原生 <audio>/<video>/<img> 标签直连试听与预览），
+      额外兼容 ?token=<token> 查询参数。
+    """
+    tokens = yaml_config_loader.get("api_server.tokens", [])
+    if not tokens:
+        return True
+
+    if credentials is not None:
+        if credentials.credentials not in tokens:
+            raise HTTPException(status_code=401, detail="Invalid authentication token")
+        return True
+
+    if request.method in ("GET", "HEAD"):
+        query_token = request.query_params.get("token")
+        if query_token:
+            if query_token in tokens:
+                return True
+            log.warning(f"[ProxyAuth] Invalid query token on {request.method} {request.url.path}")
+            raise HTTPException(status_code=401, detail="Invalid authentication token")
+
+    log.warning(f"[ProxyAuth] Unauthenticated {request.method} {request.url.path}")
+    raise HTTPException(status_code=403, detail="Not authenticated")
 
 
 class WebSocketAuthMiddleware:

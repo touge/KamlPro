@@ -19,7 +19,7 @@ from src.core.scheduler import scheduler
 from src.core.ws_manager import ws_manager
 from src.logic.logger import log
 from src.api.routes import system, tasks, llm, file_proxy, ws_proxy, stream_proxy, queue_ws, speaker
-from src.core.security import WebSocketAuthMiddleware, require_token
+from src.core.security import WebSocketAuthMiddleware, require_token, require_proxy_token
 
 
 @asynccontextmanager
@@ -73,7 +73,7 @@ def create_app() -> FastAPI:
     app.include_router(llm.router, prefix="/interface", dependencies=_auth)
     app.include_router(stream_proxy.router, prefix="/interface", dependencies=_auth)
     app.include_router(speaker.router, prefix="/interface", dependencies=_auth)
-    app.include_router(file_proxy.router, dependencies=_auth)
+    app.include_router(file_proxy.router, dependencies=[Depends(require_proxy_token)])
     # WebSocket 路由：认证由 WebSocketAuthMiddleware 中间件处理，不加 HTTP 依赖
     app.include_router(ws_proxy.router, prefix="/interface")
     app.include_router(queue_ws.router, prefix="/interface")

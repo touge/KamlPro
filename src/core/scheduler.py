@@ -18,7 +18,7 @@ import time
 import importlib
 import subprocess
 import requests
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Callable
 
 from src.logic.logger import log
 from src.core.service_controller import service_controller
@@ -160,7 +160,7 @@ class TaskScheduler:
             old_len = len(self.task_queue.queue)
             remaining = collections.deque(
                 item for item in self.task_queue.queue 
-                if item is not None and item.get("client_id") != client_id
+                if item is not None and (self._is_internal_item(item) or item.get("client_id") != client_id)
             )
             removed_count = old_len - len(remaining)
             self.task_queue.queue = remaining
@@ -397,6 +397,11 @@ class TaskScheduler:
                 if task is None:
                     break
 
+                if self._is_internal_item(task):
+                    self._execute_internal_service_task(task)
+                    self.task_queue.task_done()
+                    continue
+
                 task_type = task["type"]
                 task_id = task["id"]
                 client_id = task.get("client_id")
@@ -425,7 +430,7 @@ class TaskScheduler:
                     if task_info and task_info.get("status") == TaskManager.STATUS_FAILED:
                         log.info(f"[Scheduler] Task {task_id} was cancelled before execution. Skipping.")
                         self.task_queue.task_done()
-                        next_type = self._peek_next_task_type()
+                        peek = self._peek_next_user_task()
                         next_info = {
                             "type": "task_completed",
                             "task_id": task_id,
@@ -437,8 +442,8 @@ class TaskScheduler:
                             "next_task_type": None,
                             "next_track_mode": None,
                         }
-                        if next_type:
-                            peek = self.task_queue.queue[0]
+                        if peek:
+                            next_type = peek["type"]
                             next_info["next_task_id"] = peek["id"]
                             next_info["next_task_type"] = next_type
                             next_info["next_track_mode"] = peek.get("track_mode", self.task_track_modes.get(next_type, "poll"))
@@ -566,7 +571,7 @@ class TaskScheduler:
                 # 广播任务完成（含下一任务信息与结果详情，带 client_id 定向推送）
                 ws_manager.clear_task_progress(task_id)
                 task_info = TaskManager.get_task(task_id)
-                next_type = self._peek_next_task_type()
+                peek = self._peek_next_user_task()
                 next_info = {
                     "type": "task_completed",
                     "task_id": task_id,
@@ -579,8 +584,8 @@ class TaskScheduler:
                     "next_track_mode": None,
                     "message": "本地 GPU 任务执行完成",
                 }
-                if next_type:
-                    peek = self.task_queue.queue[0]
+                if peek:
+                    next_type = peek["type"]
                     next_info["next_task_id"] = peek["id"]
                     next_info["next_task_type"] = next_type
                     next_info["next_track_mode"] = peek.get("track_mode", self.task_track_modes.get(next_type, "poll"))
@@ -633,11 +638,116 @@ class TaskScheduler:
         finally:
             self.current_service_name = None
 
+    @staticmethod
+    def _is_internal_item(item: Any) -> bool:
+        """判断队列项是否为调度器内部同步任务（不计入用户排队序列）。"""
+        return isinstance(item, dict) and bool(item.get("_internal"))
+
+    def run_with_service(
+        self,
+        service_name: str,
+        action: Callable[[], Any],
+        stop_if_started: bool = True,
+        timeout: Optional[float] = None,
+    ) -> Any:
+        """
+        在调度器串行通道中按需激活目标服务并执行同步操作，避免与正在运行的 GPU 任务冲突。
+        若服务此前未运行且非 auto_start，操作完成后按需关闭（若队首下一项仍需该服务则保留）。
+        """
+        if not self.is_running:
+            raise RuntimeError("TaskScheduler is not running")
+        if not service_controller.is_enabled(service_name):
+            raise RuntimeError(f"Service '{service_name}' is disabled in services.yaml")
+
+        done_event = threading.Event()
+        cancelled_event = threading.Event()
+        result_box: Dict[str, Any] = {}
+
+        self.task_queue.put({
+            "_internal": True,
+            "service_name": service_name,
+            "action": action,
+            "stop_if_started": stop_if_started,
+            "done_event": done_event,
+            "cancelled_event": cancelled_event,
+            "result_box": result_box,
+        })
+
+        wait_timeout = timeout if timeout is not None else (self.startup_timeout + 60)
+        if not done_event.wait(timeout=wait_timeout):
+            cancelled_event.set()
+            raise TimeoutError(f"Timed out waiting for service '{service_name}' action after {wait_timeout}s")
+
+        if "error" in result_box:
+            raise result_box["error"]
+        return result_box.get("value")
+
+    def _execute_internal_service_task(self, task: Dict[str, Any]):
+        """在调度器工作线程中执行内部按需服务探测/查询操作。"""
+        done_event: threading.Event = task["done_event"]
+        cancelled_event: threading.Event = task["cancelled_event"]
+        result_box: Dict[str, Any] = task["result_box"]
+
+        if cancelled_event.is_set():
+            done_event.set()
+            return
+
+        service_name: str = task["service_name"]
+        action: Callable[[], Any] = task["action"]
+        stop_if_started: bool = task.get("stop_if_started", True)
+
+        self.is_local_busy = True
+        started_by_probe = False
+        try:
+            was_port_running = bool(service_controller.status(service_name).get("running"))
+            if not was_port_running:
+                if self.current_service_name and self.current_service_name != service_name:
+                    log.info(f"[Scheduler] Switching service: '{self.current_service_name}' -> '{service_name}'")
+                    self._stop_current_service()
+                self._start_service(service_name)
+                started_by_probe = True
+
+            result_box["value"] = action()
+        except Exception as e:
+            result_box["error"] = e
+        finally:
+            try:
+                if (
+                    stop_if_started
+                    and started_by_probe
+                    and not service_controller.is_auto_start(service_name)
+                    and self.current_service_name == service_name
+                    and self._peek_next_service_name() != service_name
+                ):
+                    log.info(f"[Scheduler] Stopping temporary service '{service_name}' after on-demand action.")
+                    self._stop_current_service()
+            finally:
+                self.is_local_busy = False
+                done_event.set()
+
+    def _peek_next_user_task(self) -> Optional[Dict[str, Any]]:
+        """查看队列中下一个真实用户任务（跳过内部同步探测任务）。"""
+        with self.task_queue.mutex:
+            for item in self.task_queue.queue:
+                if isinstance(item, dict) and not self._is_internal_item(item):
+                    return item
+        return None
+
     def _peek_next_task_type(self) -> str | None:
         """查看队列中下一个任务的类型（不取出），用于决策是否释放资源。"""
-        if self.task_queue.empty():
-            return None
-        return self.task_queue.queue[0]["type"]
+        nxt = self._peek_next_user_task()
+        return nxt.get("type") if nxt else None
+
+    def _peek_next_service_name(self) -> str | None:
+        """查看队列中下一个排队项所需的后端服务名称。"""
+        with self.task_queue.mutex:
+            for item in self.task_queue.queue:
+                if not isinstance(item, dict):
+                    continue
+                if self._is_internal_item(item):
+                    return item.get("service_name")
+                return self.task_service_map.get(item.get("type"))
+        return None
 
     def _maybe_free_resources(self, service_name: str, current_task_type: str):
         """
@@ -684,11 +794,15 @@ class TaskScheduler:
             return
         free_url = f"{service_url}{free_api['path']}"
         body = free_api.get("body", {})
+        headers = {}
+        token = svc_config.get("token", "")
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
 
         gpu_before = self._get_gpu_memory()
         log.info(f"[Scheduler] Calling free API: POST {free_url} body={body}")
         try:
-            resp = requests.post(free_url, json=body, timeout=10)
+            resp = requests.post(free_url, json=body, headers=headers, timeout=10)
             if resp.status_code == 200:
                 gpu_after = self._get_gpu_memory()
                 log.success(f"[Scheduler] Freed resources for {service_name} | GPU: {gpu_before} -> {gpu_after} | response: {resp.text[:200]}")
@@ -749,11 +863,15 @@ class TaskScheduler:
             try:
                 task = self.task_queue.get_nowait()
                 if task and task is not None:
-                    task_id = task.get("id")
-                    if task_id:
-                        log.warning(f"[Scheduler] Cancelling pending task {task_id}")
-                        TaskManager.update_task(task_id, TaskManager.STATUS_FAILED,
-                            {"message": "Service shutting down, task cancelled."})
+                    if self._is_internal_item(task):
+                        task["result_box"]["error"] = RuntimeError("Service shutting down, request cancelled.")
+                        task["done_event"].set()
+                    else:
+                        task_id = task.get("id")
+                        if task_id:
+                            log.warning(f"[Scheduler] Cancelling pending task {task_id}")
+                            TaskManager.update_task(task_id, TaskManager.STATUS_FAILED,
+                                {"message": "Service shutting down, task cancelled."})
                 self.task_queue.task_done()
             except queue.Empty:
                 break
@@ -765,10 +883,15 @@ class TaskScheduler:
     def get_queue_status(self, client_id: Optional[str] = None) -> Dict[str, Any]:
         """返回当前调度器队列的快照信息。若提供 client_id 则仅筛选归属于该客户端的排队任务。"""
         with self.api_lock:
-            total_queued = self.task_queue.qsize()
+            with self.task_queue.mutex:
+                user_items = [
+                    item for item in list(self.task_queue.queue)
+                    if isinstance(item, dict) and not self._is_internal_item(item)
+                ]
+            total_queued = len(user_items)
             is_busy = self.is_local_busy or (self.active_cloud_tasks > 0)
             queued_items = []
-            for idx, item in enumerate(list(self.task_queue.queue), 1):
+            for idx, item in enumerate(user_items, 1):
                 item_cid = item.get("client_id")
                 if client_id and item_cid != client_id:
                     continue
@@ -795,9 +918,11 @@ class TaskScheduler:
         """
         positions = {}
         with self.task_queue.mutex:
-            for idx, item in enumerate(self.task_queue.queue, 1):
-                if not isinstance(item, dict):
-                    continue
+            user_items = [
+                item for item in self.task_queue.queue
+                if isinstance(item, dict) and not self._is_internal_item(item)
+            ]
+            for idx, item in enumerate(user_items, 1):
                 tid = item.get("id")
                 if not tid:
                     continue

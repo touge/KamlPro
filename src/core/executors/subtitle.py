@@ -38,7 +38,10 @@ def execute(task_id: str, **payload):
             ws_manager.send(task_id, status_data)
 
             client_id = payload.get("client_id")
+            data_obj = status_data.get("data") if isinstance(status_data.get("data"), dict) else {}
             progress_val = status_data.get("progress")
+            if progress_val is None:
+                progress_val = data_obj.get("progress")
             if progress_val is not None:
                 ws_manager.emit_progress_throttled(
                     task_id=task_id,

@@ -235,70 +235,75 @@ GET /interface/tasks/{task_id}/status
 GET /interface/llm/models
 ```
 
-### TTS 语音 + 字幕（一条龙）
+### TTS 语音合成与字幕对齐（V1.5 / V2.0）
+
+#### 1. TTS 语音 + 同步字幕（`task_type: "tts"`）
+
+支持 IndexTTS `V1.5`（`/v1.5/generate`）与 `V2.0` 情感控制（`/v2.0/generate`、`/v2.0/emo_mode/generate`）：
 
 ```http
 POST /interface/tasks/submit
 Content-Type: application/json
+Authorization: Bearer 123456
 
-{ "task_type": "tts", "payload": { "path": "/v1.5/generate", "text": "...", "speaker": "...", "generate_subtitle": true } }
-```
-
-完成后通过静态端点下载产物：
-```http
-GET /file/tts/static/{backend_task_id}/{backend_task_id}.wav   # 音频
-GET /file/tts/static/{backend_task_id}/{backend_task_id}.srt   # 字幕
-```
-
-### 字幕独立生成（已有音频）
-
-```http
-POST /interface/tasks/submit
-Content-Type: multipart/form-data
-
-task_type: subtitle
-text: 文稿内容
-audio_file: <音频文件>
-```
-
-产物下载：`GET /file/tts/static/{backend_task_id}/subtitle.srt`
-
-### TTS 发音人列表
-
-获取 TTS 后端支持的所有发音人（自动代理到后端服务，透传认证 token）：
-
-```http
-GET /interface/tts/speakers
-```
-
-返回：
-```json
 {
-  "code": 200,
-  "data": {
-    "categories": [
-      {
-        "name": "中文男声",
-        "speakers": ["speaker_001", "speaker_002"]
-      }
-    ]
+  "task_type": "tts",
+  "client_id": "client_web_01",
+  "payload": {
+    "path": "/v2.0/generate",
+    "text": "欢迎使用 KamlPro 智能配音平台。",
+    "speaker": "DV",
+    "emo_vector": [0.7, 0.0, 0.0, 0.0, 0.0, 0.0, 0.3, 0.0],
+    "emo_alpha": 0.9,
+    "generate_subtitle": true
   }
 }
 ```
 
-### 文件访问
+完成后通过全方法透明代理下载产物（推荐使用 `file_url` 与静态字幕路径，可重复读取）：
+```http
+GET /proxy/tts/files/{backend_task_id}                       # 合成音频（可多次下载）
+GET /proxy/tts/static/{backend_task_id}/{backend_task_id}.srt # 同步字幕（可多次下载）
+```
+
+#### 2. 独立字幕对齐（`task_type: "subtitle"`）
 
 ```http
-GET /file/{service_name}/{file_path}
+POST /interface/tasks/submit
+Content-Type: multipart/form-data
+Authorization: Bearer 123456
+
+task_type: subtitle
+client_id: client_web_01
+text: 文稿内容
+audio_file: <音频文件>
 ```
+
+产物下载：`GET /proxy/tts/static/{backend_task_id}/subtitle.srt`（或 `GET /proxy/tts{result.data.subtitle_url}`）。
+
+### 全方法透明代理（`/proxy/{service_name}/{path:path}`，推荐）
+
+用于访问下游服务的所有**非算力/管理/试听/文件接口**（支持 `GET / HEAD / POST / PUT / DELETE / PATCH`），网关自动清洗浏览器跨域头、注入后端鉴权 Token 并支持 `Range` 流式转发：
+
+- **发音人管理**：`GET /proxy/tts/speakers`（兼容旧 `GET /proxy/tts/speaker/`）、`POST /proxy/tts/speaker/category`、`POST /proxy/tts/speaker/upload`、`PUT /proxy/tts/speaker/rename`、`DELETE /proxy/tts/speaker/`
+- **情绪音管理**：`GET /proxy/tts/emotions`（兼容 `/proxy/tts/emos` 与旧 `GET /proxy/tts/emo/`）、`POST /proxy/tts/emo/upload`、`PUT /proxy/tts/emo/rename`、`DELETE /proxy/tts/emo/`
+- **在线试听（`GET/HEAD` 兼容 `?token=` Query 鉴权，转发前自动剥离）**：
+  ```html
+  <audio controls src="http://127.0.0.1:7000/proxy/tts/static/voices/ref_audios/常用/DV.wav?token=123456"></audio>
+  ```
+- **TTS 模型状态与按需配置**：`GET /proxy/tts/model/status`、`POST /proxy/tts/model/config`、`POST /proxy/tts/free`
+- **向下兼容旧入口**：`/file/{service_name}/{file_path:path}`（`GET/HEAD/POST`）与 `/interface/tts/speakers`（带内存缓存）仍保留可用。
+
+> 📖 **TTS 与透明代理完整接入指南**：详见 [TTS与透明代理服务前端接入指南.md](file:///d:/AIGC/KamlPro/docs/TTS与透明代理服务前端接入指南.md)
 
 ## 后端服务
 
-| 服务 | 端口 | 协议 | 调度轨道 |
+| 服务 | 默认端口 | 协议 | 调度轨道与显存机制 |
 |------|------|------|---------|
-| ComfyUI | 7001 | HTTP + WebSocket | 本地 GPU（FIFO） |
-| Ollama | 11434 | HTTP | 本地 GPU（FIFO, poll 模式） |
-| TTS | 8001 | HTTP | 本地 GPU（FIFO, poll 模式） |
+| ComfyUI | 7011 | HTTP + WebSocket | 本地 GPU（FIFO，常驻 + `free_api: /free`） |
+| Ollama | 11434 | HTTP | 本地 GPU（FIFO，按需启停） |
+| TTS (IndexTTS-API) | 7012 | HTTP | 本地 GPU（FIFO，Web 主进程 0 显存常驻 + GPU 子进程隔离 + `free_api: /free`） |
+| LlamaCpp | 9931 | HTTP (OpenAI 兼容) | 本地 GPU（FIFO，按需启停） |
 | 云端API | 依配置 | HTTP | 云端 API（并发线程池） |
 
 ## 测试
@@ -375,6 +380,21 @@ python test/20260620/test_comfyui_single.py
 
 产物输出到 `test/20260620/outputs/` 下对应子目录。
 
+### 透明代理与 TTS 子进程隔离测试 (`test/20261111/`)
+
+```powershell
+# 全方法透明代理、试听 ?token= 鉴权、Range 206 流式、free_api 鉴权与单轨进度透传
+.\python3.11\python test\20261111\test_proxy_and_tts_integration.py
+
+# 旧路由 /interface/tts/speakers 按需拉起与缓存回归测试
+.\python3.11\python test\20261111\test_speaker_on_demand.py
+```
+
+IndexTTS-API 侧（`D:\AIGC\Background_Tasks\IndexTTS-API`）子进程隔离与显存生命周期测试：
+```powershell
+D:\AIGC\Background_Tasks\IndexTTS-API\python3.11\python.exe D:\AIGC\Background_Tasks\IndexTTS-API\tester\test_worker_isolation_and_lifecycle.py
+```
+
 ## 配置
 
 - `config.yaml` — API 配置、任务映射、LLM 本地模型
@@ -407,6 +427,7 @@ KamlPro 调度器内置**智能显存托管与释放机制**，由 `configs/serv
 > - 严格等前序任务完全完成后才提交下一任务：任务完成时队列为空，调度器会判定系统空闲并回收显存，下次同类型任务需重新加载模型。
 
 > 📖 **完整交付规范与接口参考**：
+> - [TTS 与透明代理服务前端接入指南](file:///d:/AIGC/KamlPro/docs/TTS与透明代理服务前端接入指南.md)（全方法透明代理 `/proxy/{service_name}/...`、TTS V1.5/V2.0、试听鉴权与显存子进程隔离架构）
 > - [任务队列机制与资源调度接入交付指南](file:///d:/AIGC/KamlPro/docs/任务队列机制与资源调度接入交付指南.md)（专为上游对接方编写的完整交付规范，含生命周期、WS 监听、代码范式与 FAQ）
 > - [下游接入契约](file:///d:/AIGC/KamlPro/docs/下游接入契约.md)（协议、端点、状态码与 WS 广播总览）
 
@@ -424,8 +445,8 @@ src/
 │       ├── queue_ws.py      # 队列广播 WebSocket
 │       ├── stream_proxy.py  # HTTP 流式透传 (NDJSON)
 │       ├── llm.py           # LLM 端点 (模型列表/普通生成)
-│       ├── speaker.py       # TTS 发音人列表代理
-│       ├── file_proxy.py    # 通用文件代理
+│       ├── speaker.py       # TTS 发音人列表代理（旧路由保留兼容）
+│       ├── file_proxy.py    # 通用全方法透明代理 (/proxy) 与文件代理 (/file)
 │       └── system.py        # 健康检查
 ├── core/
 │   ├── scheduler.py         # FIFO 队列调度器 + 智能资源释放
@@ -433,7 +454,7 @@ src/
 │   ├── ws_manager.py        # WS 连接管理 (per-task + 队列广播)
 │   ├── service_controller.py # 后端服务生命周期管理
 │   ├── response.py          # API 响应辅助
-│   ├── security.py          # Token 认证（支持浏览器 WebSocket subprotocol）
+│   ├── security.py          # Token 认证（含代理 GET/HEAD ?token= 与浏览器 WS subprotocol）
 │   ├── providers/           # Provider 模块化架构（按类型分类）
 │   │   ├── llm/             # LLM 提供商
 │   │   │   ├── base.py      # LLM 基类
@@ -465,6 +486,12 @@ src/
 ```
 
 ## 最近更新
+
+### v20261111 (v1.5.0)
+- **全方法透明代理 `/proxy/{service_name}/{path:path}`**：支持 `GET / HEAD / POST / PUT / DELETE / PATCH`、Query/Body/Range 流式透传、浏览器跨域头清洗与后端 Token 自动注入；保留 `/file/{service_name}/...` 与 `/interface/tts/speakers` 向后兼容。
+- **试听与预览鉴权兼容 (`require_proxy_token`)**：全部代理接口支持 `Authorization: Bearer <token>`，同时仅对 `GET/HEAD` 额外兼容 `?token=<token>` 查询参数（转发下游前自动剥离），方便原生 `<audio>` 标签直接试听。
+- **TTS 常驻零显存 + GPU 子进程隔离 (`IndexTTS-API`)**：Web 主进程 `auto_start: true` 常驻（0 显存，不导入 `torch`），GPU 推理隔离进 `spawn` 子进程 Worker 并按 `config.yaml` 配置（`enabled_versions`、`preload_version`、`subtitle_enabled`、`idle_unload_seconds`）按需加载；新增 `POST /free`、`POST /cancel/{task_id}`、`GET /model/status`、`POST /model/config` 与 `progress` 数值进度。
+- **调度器 `free_api` 鉴权与单轨进度增强**：`TaskScheduler._free_service_resources()` 自动携带服务 `token` 触发 `TTS` `/free` 释放；`tts` / `subtitle` 执行器兼容提取 `progress` 与分段进度换算并推送 `task_progress`。
 
 ### v20260731
 - **单一信任源 (Single Source of Truth) 服务控制架构**：所有本地物理微服务（Ollama / ComfyUI / TTS）的启用/禁用 (`enabled`) 与自启动预热 (`auto_start`) 统一收口在 `configs/services.yaml`。
