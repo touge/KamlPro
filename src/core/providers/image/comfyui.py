@@ -239,7 +239,7 @@ class _ComfyUIClient:
         ws.settimeout(30)
         try:
             last_msg_time = time.time()
-            max_idle_seconds = 300  # 5 分钟无新消息视为超时（大模型加载可能需要数分钟）
+            max_idle_seconds = 600  # 5 分钟无新消息视为超时（大模型加载可能需要数分钟）
             while True:
                 if TaskManager.is_cancelled(task_id):
                     log.info(f"[ComfyUI Client] Task {task_id} was cancelled during tracking. Closing WS, deleting queue, interrupting, and raising exception.")

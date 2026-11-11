@@ -189,6 +189,8 @@ class LLMProviderManager:
         """
         try:
             prov = self.get_provider_for_model(model_name)
+            if "service_name" in prov.config:
+                return prov.config.get("service_name")
             prov_type = prov.config.get("type") or prov.config.get("provider", "")
             if prov_type == "ollama":
                 return prov.config.get("service_name", "Ollama")

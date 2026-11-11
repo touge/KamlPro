@@ -56,9 +56,24 @@ providers:
         display_name: "DeepSeek V4 Pro (高保真)"
         modalities: ["text"]
 
+  # 🟠 本地 llama.cpp 大模型服务 (ThinkingCap-27B, 兼容 OpenAI 接口协议)
+  llamacpp:
+    enabled: true
+    type: "openai_compatible"
+    tier: "local"                  # 👈 提权：该 Provider 下所有模型默认走本地 GPU 串行队列
+    service_name: "LlamaCpp"       # 👈 关联 services.yaml 中的微服务，实现按需自动启停
+    modalities: ["text", "vision"] # 👈 支持视觉多模态
+    base_url: "http://127.0.0.1:9931/v1"
+    api_key: "llamacpp_local"      # 本地服务填任意非空字符串以规避模拟(Simulated)模式
+    models:
+      - name: "ThinkingCap-Qwen3.8-27B"
+        enabled: true
+        display_name: "ThinkingCap 27B Vision (本地 RTX4090)"
+        modalities: ["text", "vision"]
+
   # 🟣 本地 Gemini Web 服务 (兼容 OpenAI 接口协议，GeminiProxyAPI 监听 7013 端口)
   gemini:
-    enabled: true                  # 🟢 设为 false 即可禁用此 Gemini API 提供商
+    enabled: false                  # 🟢 设为 false 即可禁用此 Gemini API 提供商
     type: "openai_compatible"
     tier: "api"                    # 👈 提权：网络代理转发型，不占本机 GPU 显存，走并发队列
     modalities: ["text"]
@@ -66,39 +81,39 @@ providers:
     api_key: "gemini_local"        # 本地服务填任意非空字符串以规避模拟(Simulated)模式
     models:
       - name: "gemini-3-flash"
-        enabled: true
+        enabled: false
         display_name: "Gemini 3 Flash (极速)"
         modalities: ["text"]
       - name: "gemini-3-pro"
-        enabled: true
+        enabled: false
         display_name: "Gemini 3 Pro (高保真)"
         modalities: ["text"]
       - name: "gemini-3-flash-thinking"
-        enabled: true
+        enabled: false
         display_name: "Gemini 3 Flash Thinking (深度思考)"
         modalities: ["text"]
       - name: "gemini-3-flash-plus"
-        enabled: true
+        enabled: false
         display_name: "Gemini 3 Flash Plus"
         modalities: ["text"]
       - name: "gemini-3-pro-plus"
-        enabled: true
+        enabled: false
         display_name: "Gemini 3 Pro Plus"
         modalities: ["text"]
       - name: "gemini-3-flash-thinking-plus"
-        enabled: true
+        enabled: false
         display_name: "Gemini 3 Flash Thinking Plus"
         modalities: ["text"]
       - name: "gemini-3-flash-advanced"
-        enabled: true
+        enabled: false
         display_name: "Gemini 3 Flash Advanced"
         modalities: ["text"]
       - name: "gemini-3-pro-advanced"
-        enabled: true
+        enabled: false
         display_name: "Gemini 3 Pro Advanced"
         modalities: ["text"]
       - name: "gemini-3-flash-thinking-advanced"
-        enabled: true
+        enabled: false
         display_name: "Gemini 3 Flash Thinking Advanced"
         modalities: ["text"]
 

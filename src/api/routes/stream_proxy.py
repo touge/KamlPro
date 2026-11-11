@@ -36,7 +36,7 @@ STREAM_START_TIMEOUT = 60  # 等待队列分配的超时时间（秒）
 @router.post("/llm/generate-stream")
 async def llm_generate_stream(req: LLMGenerateStreamRequest):
     if not req.client_id or not str(req.client_id).strip():
-        return error("Missing required field 'client_id'. Please specify client_id.", 400)
+        req.client_id = "client_default"
 
     task_id = TaskManager.create_task("llm_streaming", client_id=req.client_id)
 

@@ -24,7 +24,104 @@ TASK_FOLDER = Path(yaml_config_loader.get("paths.task_folder", "tasks"))
 TYPE_ALIASES = {}
 
 
-@router.post("/tasks/submit")
+_SUBMIT_TASK_OPENAPI_EXTRA = {
+    "requestBody": {
+        "required": True,
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "required": ["task_type", "payload"],
+                    "properties": {
+                        "task_type": {
+                            "type": "string",
+                            "description": "任务类型，如 tts / comfyui / llm / llm_streaming",
+                        },
+                        "client_id": {
+                            "type": "string",
+                            "description": "客户端标识（可选；未传时按请求 IP 自动分配）",
+                        },
+                        "asset_status": {
+                            "type": "string",
+                            "default": "ready",
+                            "description": "素材就绪状态：ready 或 not_ready",
+                        },
+                        "required_assets": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "需要延迟上传或复用的素材文件名列表",
+                        },
+                        "payload": {
+                            "type": "object",
+                            "description": "透传给对应执行器的任务参数字典",
+                        },
+                    },
+                },
+                "examples": {
+                    "tts": {
+                        "summary": "TTS 语音合成",
+                        "value": {
+                            "task_type": "tts",
+                            "client_id": "swagger_debug",
+                            "payload": {
+                                "path": "/v1.5/generate",
+                                "text": "欢迎使用 Kalm 智能配音平台。",
+                                "speaker": "解说-魔魔",
+                                "generate_subtitle": True,
+                            },
+                        },
+                    },
+                    "llm": {
+                        "summary": "LLM 对话",
+                        "value": {
+                            "task_type": "llm",
+                            "client_id": "swagger_debug",
+                            "payload": {
+                                "model": "gemma3:12b",
+                                "prompt": "你好，请介绍一下你自己。",
+                            },
+                        },
+                    },
+                    "comfyui": {
+                        "summary": "ComfyUI 生图",
+                        "value": {
+                            "task_type": "comfyui",
+                            "client_id": "swagger_debug",
+                            "payload": {
+                                "workflow": {},
+                                "final_output_node_id": "9",
+                            },
+                        },
+                    },
+                },
+            },
+            "multipart/form-data": {
+                "schema": {
+                    "type": "object",
+                    "required": ["task_type"],
+                    "properties": {
+                        "task_type": {
+                            "type": "string",
+                            "default": "subtitle",
+                            "description": "表单任务类型，如 subtitle",
+                        },
+                        "client_id": {"type": "string"},
+                        "text": {"type": "string", "description": "字幕对齐文本"},
+                        "audio_file": {
+                            "type": "string",
+                            "format": "binary",
+                            "description": "音频文件",
+                        },
+                        "output_filename": {"type": "string"},
+                    },
+                }
+            },
+        },
+    }
+}
+
+
+@router.post("/tasks/submit", openapi_extra=_SUBMIT_TASK_OPENAPI_EXTRA)
 async def submit_task(request: Request):
     """统一任务提交。支持 JSON 和 multipart/form-data 两种请求格式，支持可选的 client_id。"""
     content_type = request.headers.get("content-type", "")
@@ -36,9 +133,14 @@ async def submit_task(request: Request):
         if not task_type:
             return error("Missing 'task_type' in form data", 400)
 
-        client_id = form.get("client_id") or request.headers.get("x-client-id")
+        client_id = (
+            form.get("client_id")
+            or request.headers.get("x-client-id")
+            or request.query_params.get("client_id")
+        )
         if not client_id or not str(client_id).strip():
-            return error("Missing required field 'client_id'. Please specify client_id.", 400)
+            client_id = f"client_{request.client.host.replace('.', '_')}" if request.client else "client_default"
+            log.info(f"[API] Multipart 表单未携带 client_id，自动按 IP 分配: '{client_id}'")
         asset_status = form.get("asset_status") or "ready"
         required_assets = form.get("required_assets")
         if isinstance(required_assets, str):
@@ -91,14 +193,23 @@ async def submit_task(request: Request):
     else:
         try:
             body = await request.json()
-        except Exception:
+        except Exception as e:
+            log.warning(f"[API 400] Request body is not valid JSON: {e}")
             return error("Request body must be valid JSON, or use multipart/form-data for file uploads", 400)
 
         task_type = body.get("task_type", "")
         payload = body.get("payload", {})
-        client_id = body.get("client_id") or payload.get("client_id") or request.headers.get("x-client-id")
+        client_id = (
+            body.get("client_id")
+            or payload.get("client_id")
+            or request.headers.get("x-client-id")
+            or request.query_params.get("client_id")
+        )
         if not client_id or not str(client_id).strip():
-            return error("Missing required field 'client_id'. Please specify client_id.", 400)
+            client_id = f"client_{request.client.host.replace('.', '_')}" if request.client else "client_default"
+            log.info(f"[API] 客户端未显式携带 client_id，已自动按 IP 兜底分配: '{client_id}'")
+
+        log.info(f"[API] 收到 /tasks/submit 请求: task_type='{task_type}', client_id='{client_id}'")
         payload["client_id"] = client_id
         
         asset_status = body.get("asset_status") or payload.get("asset_status") or "ready"
@@ -106,9 +217,8 @@ async def submit_task(request: Request):
         if isinstance(required_assets, str):
             required_assets = [required_assets]
 
-        log.info(f"[API] 客户端原始请求: task_type='{task_type}', client_id='{client_id}', asset_status='{asset_status}', payload keys={list(payload.keys())}")
-
         if not task_type:
+            log.warning(f"[API 400] 缺少 task_type! 请求体: {body}")
             return error("Missing 'task_type' in request body", 400)
 
         task_id = TaskManager.create_task(
@@ -120,6 +230,7 @@ async def submit_task(request: Request):
     internal_type = TYPE_ALIASES.get(task_type, task_type)
     known_types = list(scheduler.task_executors.keys())
     if internal_type not in known_types:
+        log.warning(f"[API 400] 未知任务类型 task_type='{task_type}' (internal='{internal_type}'), 可用类型: {known_types}")
         return error(f"Unknown task type: '{task_type}'. Known types: {known_types}", 400)
 
     try:

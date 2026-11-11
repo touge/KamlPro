@@ -44,7 +44,7 @@ async def list_models():
 @router.post("/llm/generate")
 async def generate(req: GenerateRequest):
     if not req.client_id or not str(req.client_id).strip():
-        return error("Missing required field 'client_id'. Please specify client_id.", 400)
+        req.client_id = "client_default"
 
     task_type = "llm"
     task_id = TaskManager.create_task(task_type, client_id=req.client_id)

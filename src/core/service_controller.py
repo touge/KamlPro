@@ -540,6 +540,27 @@ class _ServiceController:
             else:
                 log.info(f"No process found for service '{key}' on port {port}")
 
+            # ---- 终止直接启动的子进程树（避免批处理 pause 阻塞）----
+            if key in self.processes:
+                try:
+                    proc = self.processes[key]
+                    if proc.poll() is None:
+                        try:
+                            p = psutil.Process(proc.pid)
+                            for c in p.children(recursive=True):
+                                try:
+                                    c.kill()
+                                except (psutil.NoSuchProcess, Exception):
+                                    pass
+                            p.kill()
+                        except (psutil.NoSuchProcess, Exception):
+                            proc.kill()
+                except Exception as e:
+                    log.warning(f"Error terminating process for '{key}': {e}")
+                finally:
+                    if key in self.processes:
+                        del self.processes[key]
+
             # ---- 等待端口释放 ----
             timeout = 10
             start_time = time.time()
