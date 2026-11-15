@@ -1,5 +1,36 @@
 # Changelog
 
+## [v1.6.0] - 2026-11-15
+
+### 🦙 LlamaSwap 算力调度中枢接入、大模型零配置动态自发现与端口冲突强杀增强
+
+彻底消除大模型物理微服务与逻辑路由间的配置冗余（SSOT 单一数据源原则），接入轻量级 `llama-swap` 算力调度中枢并打通全自动模型发现、视觉模态识别、物理显存一键卸载闭环，同时解决物理子进程端口占用与虚假退出卡死问题：
+
+- **LlamaSwap 调度中枢接入与物理微服务唯一真实源 (`configs/services.yaml`)**:
+  - 彻底淘汰旧版单一 `LlamaCpp` 进程模式，接入轻量高效的 `llama-swap` 算力调度中枢（Go 原生高性能反向代理 + 毫秒级多模型按需热切换）；
+  - `services.yaml` 统一定义物理服务 `LlamaSwap`（`port: 11435`、`auto_start: true`、`free_api: /api/models/unload`），成为物理微服务的唯一真实源（Single Source of Truth）。
+- **零配置冗余：`base_url` 智能推导与端口解耦 (`src/core/providers/llm/openai_compatible.py`, `configs/llm_config.yaml`)**:
+  - `OpenAICompatibleProvider.get_base_url()`：当配置中未显式指定 `base_url` 时，自动关联 `service_name` 并通过 `service_controller.get_service_url(service_name) + "/v1"` 动态拼装；
+  - `llm_config.yaml` 彻底免配 `base_url` 与 `11435` 端口号，`llamaswap` 节点仅需 5 行配置，杜绝两头重复修改；
+  - 本地微服务免 API Key 场景自动赋予 `"local"` 默认凭据，规避误入 Simulated 模拟模式。
+- **零配置冗余：大模型双模自发现与视觉多模态智能映射 (`src/core/providers/llm/manager.py`, `src/core/providers/llm/openai_compatible.py`, `src/api/routes/llm.py`)**:
+  - **在线探测**：未显式配置 `models` 列表时，自动请求 `GET /v1/models` 提取可用大模型（`qwen3.8-code-fast`、`qwen3.8-code-128k`、`qwen3.8-art-vision`）；
+  - **离线回退**：若微服务离线或未启动，自动回退解析 `llama-swap/config.yaml` 提取模型定义；
+  - **模态自适应**：智能识别 `art-vision`、`vision` 或包含 `--mmproj` 参数的模型，自动打上 `['text', 'vision']` 多模态标签；
+  - **懒加载发现**：任务调度中未注册模型自动触发按需刷新；重构 `get_available_models()` 并驱动 `GET /llm/models` 实时返回动态发现的所有可用模型。
+- **原生物理显存一键回收 (`POST /api/models/unload`)**:
+  - 接入 `llama-swap` 原生显存卸载端点，当调度器切换任务或空闲释放时自动触发，实测单卡显存从 22GB 瞬间物理归还至 1.2GB（释放 20.8GB），无缝让渡给 TTS 与 ComfyUI。
+- **端口冲突强杀与 TCP 套接字确认增强 (`src/core/service_controller.py`)**:
+  - `_get_pids_by_port()`：全面支持非 LISTEN 状态连接扫描与 Windows `netstat -ano` 降级兜底；
+  - `_ensure_port_released()`：在杀除后通过底层 `socket.bind()` 循环探测，确保操作系统内核完全回收 TCP 端口后再返回；
+  - `_kill_process_on_port()`：整合 `psutil` 递归子进程树与 Windows 原生 `taskkill /F /T` 强杀机制；
+  - `wait_until_ready()` 增强崩溃日志捕获，杜绝子进程被外部占用闪退时错误日志丢失。
+- **自动化测试**:
+  - 新增 `test/20261115/test_llamaswap_integration.py`（5/5 测试通过）；
+  - 历史 `test_proxy_and_tts_integration.py`（5/5）、`test_speaker_on_demand.py`（6/6）全部回归通过。
+
+---
+
 ## [v1.5.0] - 2026-11-11
 
 ### 🎙️ TTS 常驻零显存改造、GPU 推理子进程隔离与全方法透明代理 (`/proxy/{service_name}/...`)

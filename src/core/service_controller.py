@@ -18,6 +18,8 @@ import yaml
 import time
 import threading
 import os
+import sys
+import socket
 import re
 from pathlib import Path
 from collections import defaultdict
@@ -161,7 +163,10 @@ class _ServiceController:
         key = self._find_service_key(service_name)
         svc = self.services.get(key) if key else None
         if svc and "host" in svc and "port" in svc:
-            return f"{svc['host']}:{svc['port']}"
+            host = str(svc['host']).rstrip('/')
+            if not host.startswith("http://") and not host.startswith("https://"):
+                host = f"http://{host}"
+            return f"{host}:{svc['port']}"
         return None
 
     # =========================================================================
@@ -256,9 +261,17 @@ class _ServiceController:
         while time.time() - start_time < timeout:
             # 进程提前退出 → 启动失败
             if proc.poll() is not None:
+                remaining_output = ""
+                try:
+                    if proc.stdout:
+                        remaining_output = proc.stdout.read()
+                except Exception:
+                    pass
+                if remaining_output:
+                    output_buffer += remaining_output
                 raise RuntimeError(
                     f"Service '{key}' exited prematurely with code {proc.poll()}. "
-                    f"Output: {output_buffer}"
+                    f"Output: {output_buffer.strip()}"
                 )
 
             line = proc.stdout.readline()
@@ -299,10 +312,9 @@ class _ServiceController:
                 continue
             svc = self.services[real_key]
             port = svc.get("port")
-            # 端口被占 → 强杀后重启，确保是 Kalm 管理的实例
-            if port and self._get_pid_by_port(port):
-                self._kill_process_on_port(port)
-                time.sleep(0.5)  # 等端口释放
+            # 端口被占 → 强杀后重启，确保是 Kalm 管理的实例并彻底释放端口
+            if port:
+                self._kill_process_on_port(port, wait_release=True)
             log.info(f"Auto-starting service '{real_key}'...")
             try:
                 self._launch_process(real_key, svc)
@@ -593,42 +605,112 @@ class _ServiceController:
     # 端口检测
     # =========================================================================
 
-    def _get_pid_by_port(self, port: int) -> int | None:
+    def _get_pids_by_port(self, port: int) -> list[int]:
         """
-        通过端口号查找监听进程的 PID。
-        使用 psutil.net_connections 遍历所有网络连接，
-        匹配 LISTEN 状态且端口一致的第一条记录。
+        通过端口号查找占用/监听该端口的所有进程 PID。
+        结合 psutil.net_connections 与 Windows 原生 netstat 做双重保障。
         """
         if port is None:
-            return None
-        for conn in psutil.net_connections(kind='inet'):
-            if conn.laddr.port == port and conn.status == psutil.CONN_LISTEN:
-                return conn.pid
-        return None
-
-    def _kill_process_on_port(self, port: int):
-        """
-        强杀占用指定端口的进程及其子进程树。
-        auto_start 服务启动时如果端口被外部进程占用，先 kill 再启动。
-        """
-        pid = self._get_pid_by_port(port)
-        if not pid:
-            return
+            return []
+        pids = set()
+        # 1. 优先通过 psutil 扫描
         try:
-            proc = psutil.Process(pid)
-            name = proc.name()
-            log.warning(f"Killing process '{name}' (PID {pid}) occupying port {port}...")
-            children = proc.children(recursive=True)
-            for child in children:
-                child.kill()
-            psutil.wait_procs(children, timeout=3)
-            proc.kill()
-            proc.wait(timeout=5)
-            log.success(f"Killed process '{name}' (PID {pid}), port {port} released.")
-        except psutil.NoSuchProcess:
-            log.info(f"Process on port {port} already gone.")
-        except Exception as e:
-            log.error(f"Failed to kill process on port {port}: {e}")
+            for conn in psutil.net_connections(kind='inet'):
+                if conn.laddr and conn.laddr.port == port and conn.pid:
+                    pids.add(conn.pid)
+        except Exception:
+            pass
+
+        # 2. Windows 平台使用 netstat -ano 兜底查全
+        if sys.platform == "win32":
+            try:
+                out = subprocess.check_output(
+                    f"netstat -ano | findstr :{port}",
+                    shell=True,
+                    text=True,
+                    errors="ignore",
+                )
+                for line in out.splitlines():
+                    parts = line.strip().split()
+                    if len(parts) >= 5 and parts[1].endswith(f":{port}"):
+                        try:
+                            p = int(parts[-1])
+                            if p > 0:
+                                pids.add(p)
+                        except ValueError:
+                            pass
+            except Exception:
+                pass
+
+        return list(pids)
+
+    def _get_pid_by_port(self, port: int) -> int | None:
+        """
+        查找监听指定端口的第一个进程 PID（向后兼容接口）。
+        """
+        pids = self._get_pids_by_port(port)
+        return pids[0] if pids else None
+
+    def _ensure_port_released(self, port: int, timeout: float = 3.0) -> bool:
+        """
+        循环探测指定 TCP 端口是否已彻底释放并可绑定。
+        """
+        if port is None:
+            return True
+        start_t = time.time()
+        while time.time() - start_t < timeout:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    s.bind(("0.0.0.0", port))
+                    return True
+            except OSError:
+                time.sleep(0.15)
+        return False
+
+    def _kill_process_on_port(self, port: int, wait_release: bool = True, timeout: float = 3.0):
+        """
+        强杀占用指定端口的所有进程及其子进程树，并可选等待端口彻底释放。
+        auto_start 服务启动时如果端口被占用，先清空再启动。
+        """
+        pids = self._get_pids_by_port(port)
+        for pid in pids:
+            try:
+                proc = psutil.Process(pid)
+                name = proc.name()
+                log.warning(f"Killing process '{name}' (PID {pid}) occupying port {port}...")
+                children = proc.children(recursive=True)
+                for child in children:
+                    try:
+                        child.kill()
+                    except Exception:
+                        pass
+                psutil.wait_procs(children, timeout=2)
+                proc.kill()
+                proc.wait(timeout=3)
+                log.success(f"Killed process '{name}' (PID {pid}).")
+            except psutil.NoSuchProcess:
+                pass
+            except Exception as e:
+                log.warning(f"psutil failed killing PID {pid} on port {port}: {e}")
+
+            # Windows 底层 taskkill /F /T 兜底，防止挂起的孤儿批处理或子进程逃逸
+            if sys.platform == "win32":
+                try:
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(pid)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                except Exception:
+                    pass
+
+        if wait_release:
+            if not self._ensure_port_released(port, timeout=timeout):
+                log.warning(f"Port {port} still not released after {timeout}s.")
+            else:
+                if pids:
+                    log.success(f"Port {port} confirmed released and ready for bind.")
 
     # =========================================================================
     # 下载协调（防止服务先于下载被关闭）

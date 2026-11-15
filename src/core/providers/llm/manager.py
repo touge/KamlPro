@@ -127,7 +127,21 @@ class LLMProviderManager:
                 log.info(f"[LLM Manager] Instantiated provider '{provider_name}' of type '{prov_type}' (tier={prov_tier})")
 
                 # 解析该提供商下所支持的所有大模型列表，并构建高效快速检索映射
-                models_list = provider_config.get("models", [])
+                models_list = provider_config.get("models")
+                if models_list is None or (isinstance(models_list, list) and len(models_list) == 0):
+                    # 未显式配置模型列表时，尝试通过 discover_models 动态拉取
+                    if hasattr(provider_instance, "discover_models"):
+                        try:
+                            discovered = provider_instance.discover_models()
+                            if discovered:
+                                models_list = discovered
+                                log.info(f"[LLM Manager] Dynamically discovered {len(discovered)} models for '{provider_name}'")
+                        except Exception as disc_err:
+                            log.warning(f"[LLM Manager] Dynamic discovery error for '{provider_name}': {disc_err}")
+
+                if not models_list:
+                    models_list = []
+
                 for m in models_list:
                     if not m.get("enabled", True):
                         continue
@@ -158,6 +172,26 @@ class LLMProviderManager:
         if provider:
             return provider
 
+        # 尝试对所有具备 discover_models 的提供商进行懒加载刷新（应对模型后来启动或热加载场景）
+        for prov_name, prov in self.providers.items():
+            if hasattr(prov, "discover_models"):
+                try:
+                    disc = prov.discover_models()
+                    for m in disc:
+                        m_name = m.get("name")
+                        if m_name:
+                            self.model_to_provider[m_name] = prov
+                            m_tier = m.get("tier") or prov.config.get("tier", "api")
+                            self.model_to_tier[m_name] = m_tier
+                            self.model_to_modalities[m_name] = m.get("modalities", ["text"])
+                except Exception:
+                    pass
+
+        provider = self.model_to_provider.get(model_name)
+        if provider:
+            log.info(f"[LLM Manager] Dynamically resolved model '{model_name}' on demand")
+            return provider
+
         # 极致防崩兜底：尝试使用本地 Ollama 提供商作为备选
         log.warning(f"[LLM Manager] Model '{model_name}' is not registered under any provider, falling back to 'ollama'")
         ollama_provider = self.providers.get("ollama")
@@ -166,6 +200,23 @@ class LLMProviderManager:
 
         # 彻底 Fail-fast
         raise KeyError(f"No provider found for model '{model_name}', and no fallback 'ollama' provider is available.")
+
+    def get_available_models(self) -> list[dict]:
+        """
+        获取当前系统中所有已注册/已发现的模型列表。
+        返回包含 name, display_name, provider, tier, modalities 的字典列表。
+        """
+        result = []
+        for model_name, prov in self.model_to_provider.items():
+            result.append({
+                "name": model_name,
+                "display_name": model_name,
+                "provider": prov.name,
+                "tier": self.model_to_tier.get(model_name, "api"),
+                "modalities": self.model_to_modalities.get(model_name, ["text"]),
+                "enabled": True,
+            })
+        return result
 
     def get_model_tier(self, model_name: str) -> str:
         """

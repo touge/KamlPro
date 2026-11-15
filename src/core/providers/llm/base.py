@@ -57,6 +57,13 @@ class BaseLLMProvider:
         """
         raise NotImplementedError
 
+    def discover_models(self) -> list[dict]:
+        """
+        动态发现/获取该提供商当前可用的模型列表。
+        子类可选择重写此方法（例如通过 GET /v1/models 或扫描本地服务配置文件）。
+        """
+        return []
+
     def _resolve_env_var(self, val: str) -> str:
         """解析环境变量引用，如 ${ENV_VAR}"""
         if not val or not isinstance(val, str):

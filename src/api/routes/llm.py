@@ -28,14 +28,8 @@ class GenerateRequest(BaseModel):
 
 @router.get("/llm/models")
 async def list_models():
-    llm_data = yaml_config_loader.get("llm_providers.providers", {})
-    flat_models = []
-    for provider_name, provider_config in llm_data.items():
-        models_list = provider_config.get("models", [])
-        for m in models_list:
-            m_copy = dict(m)
-            m_copy["provider"] = provider_name
-            flat_models.append(m_copy)
+    from src.core.providers.llm.manager import llm_provider_manager
+    flat_models = llm_provider_manager.get_available_models()
     return success(data={
         "models": flat_models,
     })

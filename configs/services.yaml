@@ -102,7 +102,6 @@ ComfyUI:
   platforms:
     windows:
       type: cmd
-      # path: "D:/AIGC/ComfyUI/KamlPro-service/launcher.bat"
       path: "D:/AIGC/ComfyUI/developer-260711/launcher.bat"    
     linux:
       type: sh
@@ -131,8 +130,8 @@ TTS:
   # 平台特异性覆盖与扩展
   platforms:
     windows:
-      type: ps1
-      path: "D:/AIGC/Background_Tasks/IndexTTS-API/P8001.ps1"
+      type: cmd
+      path: "D:/AIGC/TTS/IndexTTS-API/launcher.bat"
       
     linux:
       type: sh
@@ -140,36 +139,22 @@ TTS:
       env:
         CUDA_VISIBLE_DEVICES: "0"
 
-# ============================================================================
-# 4. Gemini Web 大模型 API 服务 (Gemini-FastAPI)
-# ============================================================================
-GeminiProxyAPI:
-  enabled: false                    # 服务总开关
-  auto_start: false                 # Kalm 启动时自动预热拉起 Gemini Web 服务
-  host: "http://127.0.0.1"
-  port: 7013                       # Gemini-FastAPI 监听端口
-  ready_keyword: "Application startup complete."  # 就绪标志词
-  manage_lifecycle: true           # 托管生命周期
-  startup_timeout: 60              # 启动就绪超时
-  
-  # 平台特异性覆盖与扩展
-  platforms:
-    windows:
-      type: cmd
-      path: "D:/AIGC/Gemini-FastAPI/launcher.bat"
 
 # ============================================================================
-# 5. LlamaCpp 本地大模型推理服务 (ThinkingCap-27B)
+# 5. LlamaSwap 本地大模型调度中枢 (多模型动态按需热切换)
 # ============================================================================
-LlamaCpp:
+LlamaSwap:
   enabled: true                    # 服务总开关
-  auto_start: false                # 是否随 Kalm 启动时自动拉起
+  auto_start: true                 # 随 KamlPro 自动拉起常驻代理（极轻量，空闲零显存）
   host: "http://127.0.0.1"          # 服务主机
-  port: 9931                       # llama-server 监听端口
-  ready_keyword: "llama_server: listening on"  # 就绪标志词
-  manage_lifecycle: true           # 由 Kalm 自动按需启动和关闭进程
-  startup_timeout: 300             # 27B 大模型显存加载耗时较长，预留 300 秒超时
+  port: 11435                      # llama-swap 监听端口
+  ready_keyword: "Web 控制台"        # 就绪标志词 (来自 launcher.bat)
+  manage_lifecycle: true           # 由 KamlPro 自动管理生命周期
+  startup_timeout: 30              # Go 代理毫秒级启动
+  free_api:
+    path: "/api/models/unload"     # 原生一键释放显卡显存接口
+    method: "POST"
   platforms:
     windows:
       type: cmd
-      path: "D:/AIGC/llama.cpp/ThinkingCap-27B-Vision-RTX4090-96K-V2.bat"
+      path: "D:/AIGC/llama-swap/launcher.bat"

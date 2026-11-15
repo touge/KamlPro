@@ -20,6 +20,114 @@ from src.logic.logger import log
 
 @register_provider("openai_compatible")
 class OpenAICompatibleProvider(BaseLLMProvider):
+    def get_base_url(self) -> str:
+        """获取 base_url。若未显式配置，自动从绑定的 service_name 动态推导并拼接 /v1。"""
+        base_url = self.config.get("base_url", "")
+        if not base_url:
+            service_name = self.config.get("service_name")
+            if service_name:
+                from src.core.service_controller import service_controller
+                svc_url = service_controller.get_service_url(service_name)
+                if svc_url:
+                    base_url = f"{svc_url.rstrip('/')}/v1"
+        return base_url
+
+    def get_api_key(self) -> str:
+        """获取 API Key。本地微服务缺省免 Key，默认使用 local 以免误入模拟模式。"""
+        api_key = self._resolve_env_var(self.config.get("api_key", ""))
+        if not api_key and self.config.get("service_name"):
+            return "local"
+        return api_key
+
+    def discover_models(self) -> list[dict]:
+        """
+        动态发现当前提供商支持的模型列表：
+        1. 优先尝试从在线 API (GET {base_url}/models) 实时发现。
+        2. 若服务未启动或连接受限，且配置了本地微服务 (service_name)，回退至读取该服务根目录下的配置文件 (config.yaml)。
+        """
+        base_url = self.get_base_url()
+        api_key = self.get_api_key()
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+
+        # ---- 策略 1: 在线 API 探测 ----
+        if base_url:
+            api_url = f"{base_url.rstrip('/')}/models"
+            try:
+                resp = requests.get(api_url, headers=headers, timeout=2.5)
+                if resp.status_code == 200:
+                    data = resp.json().get("data", [])
+                    discovered = []
+                    for item in data:
+                        m_id = item.get("id")
+                        if not m_id:
+                            continue
+                        modalities = ["text"]
+                        arch = item.get("architecture", {})
+                        in_mods = arch.get("input_modalities", [])
+                        if "image" in in_mods or "vision" in in_mods or "vision" in m_id.lower() or "art" in m_id.lower():
+                            modalities.append("vision")
+                        discovered.append({
+                            "name": m_id,
+                            "display_name": item.get("name") or m_id,
+                            "modalities": modalities,
+                            "enabled": True,
+                        })
+                    if discovered:
+                        log.info(f"[LLM] Auto-discovered {len(discovered)} models online from '{api_url}'")
+                        return discovered
+            except Exception as e:
+                log.debug(f"[LLM] Online model discovery failed for '{self.name}' ({api_url}): {e}")
+
+        # ---- 策略 2: 本地配置文件回退读取 ----
+        service_name = self.config.get("service_name")
+        if service_name:
+            from src.core.service_controller import service_controller
+            svc_cfg = service_controller.get_service_config(service_name)
+            if svc_cfg:
+                import os
+                import yaml
+                script_path = None
+                platforms = svc_cfg.get("platforms")
+                if isinstance(platforms, dict):
+                    # 优先取 windows 平台，缺省取第一个平台脚本
+                    win_cfg = platforms.get("windows")
+                    if isinstance(win_cfg, dict):
+                        script_path = win_cfg.get("path")
+                    elif platforms:
+                        first_plat = next(iter(platforms.values()))
+                        if isinstance(first_plat, dict):
+                            script_path = first_plat.get("path")
+                if not script_path:
+                    script_path = svc_cfg.get("path")
+
+                if script_path:
+                    svc_dir = os.path.dirname(os.path.abspath(script_path))
+                    for cfg_name in ("config.yaml", "config.yml"):
+                        cfg_file = os.path.join(svc_dir, cfg_name)
+                        if os.path.exists(cfg_file):
+                            try:
+                                with open(cfg_file, "r", encoding="utf-8") as f:
+                                    local_cfg = yaml.safe_load(f) or {}
+                                models_dict = local_cfg.get("models", {})
+                                if isinstance(models_dict, dict) and models_dict:
+                                    discovered = []
+                                    for m_id, m_info in models_dict.items():
+                                        modalities = ["text"]
+                                        cmd_str = str(m_info.get("cmd", "")) if isinstance(m_info, dict) else ""
+                                        if "vision" in m_id.lower() or "art" in m_id.lower() or "--mmproj" in cmd_str:
+                                            modalities.append("vision")
+                                        discovered.append({
+                                            "name": m_id,
+                                            "display_name": m_id,
+                                            "modalities": modalities,
+                                            "enabled": True,
+                                        })
+                                    log.info(f"[LLM] Auto-discovered {len(discovered)} models offline from '{cfg_file}'")
+                                    return discovered
+                            except Exception as e:
+                                log.warning(f"[LLM] Failed to parse local service config '{cfg_file}': {e}")
+        return []
+
     @staticmethod
     def _build_messages(prompt: str, options: dict) -> list:
         """根据是否包含图片，构建单轮或多模态消息体"""
@@ -36,8 +144,8 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         return [{"role": "user", "content": content_list}]
 
     def generate(self, model: str, prompt: str, options: dict) -> dict:
-        base_url = self.config.get("base_url", "")
-        api_key = self._resolve_env_var(self.config.get("api_key", ""))
+        base_url = self.get_base_url()
+        api_key = self.get_api_key()
 
         # 💡 调试辅助：如果未配 Key，自动进入本地模拟测试模式，确保测试用例开箱即用
         if not api_key:
@@ -94,8 +202,8 @@ class OpenAICompatibleProvider(BaseLLMProvider):
                 ws_manager.send(task_id, {"type": "task_failed", "message": "Stream handshake timeout"})
                 return
 
-        base_url = self.config.get("base_url", "")
-        api_key = self._resolve_env_var(self.config.get("api_key", ""))
+        base_url = self.get_base_url()
+        api_key = self.get_api_key()
 
         # 💡 调试辅助：如果未配 Key，自动进入本地模拟测试模式，确保测试用例开箱即用
         if not api_key:
