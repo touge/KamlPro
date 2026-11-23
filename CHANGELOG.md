@@ -1,5 +1,27 @@
 # Changelog
 
+## [v1.7.0] - 2026-11-23
+
+### 📊 新增宿主机与 GPU 实时监控接口 (`GET /interface/system/stats`)
+
+为满足下游厂商前端面板对 AIGC 生产节点硬件负载与网络状态的实时观测需求，新增轻量级异步后台采样监控模块与统一查询接口：
+
+- **后台守护线程采样器 (`src/logic/system_monitor.py`)**:
+  - 实现 `SystemMonitor` 单例，通过独立守护线程（`SystemMonitorThread`）每 3 秒周期采样 CPU、内存、GPU 与网络吞吐并原子刷新内存快照；HTTP 接口仅读取内存并实时拼接服务端 `uptime_sec` 与 `gateway_version`，实现毫秒级零压力响应。
+  - **GPU 底层直采与优雅降级**：引入官方 `nvidia-ml-py`（`pynvml`）直接调用 NVML C 接口采集多卡阵列信息（`index`、`name`、`vram_used_mb` / `vram_total_mb` / `vram_free_mb` / `vram_usage_percent`、`utilization_percent`、`temperature_c`、`power_draw_w` / `power_limit_w`、`driver_version`、`cuda_version`），规避频繁拉起 `nvidia-smi` 子进程开销；当 `pynvml` 缺失或无 NVIDIA 驱动时自动降级返回 `gpus: []`。
+  - **跨平台兼容与容错增强**：
+    - `cpu`：启动一次性读取可读型号（Windows 注册表 `ProcessorNameString` / Linux `/proc/cpuinfo`），返回物理核数、线程数、总占用率与 `load_avg`（1/5/15 分钟均值）；
+    - `memory`：优先调用 `psutil.swap_memory()`；针对部分 Windows 环境禁用性能计数器导致 `PdhAddEnglishCounterW` 抛 `RuntimeError` 的问题，新增基于 `psapi.GetPerformanceInfo` 的 `_windows_pagefile_total_mb()` 兜底兼容，确保跨平台返回结构与整数类型完全一致；
+    - `network`：通过 `psutil.net_io_counters(pernic=True)` 过滤 `lo` / `Loopback` 回环网卡，按单调时钟差分换算实时上下行速率（`rx_mbps` / `tx_mbps`），避免本地服务代理中转流量干扰统计；
+    - `server`：返回 `hostname`、友好 `os` 名称（Linux 解析 `/etc/os-release`，Windows 识别 Windows 11/10）、网关连续运行时长 `uptime_sec` 及 `gateway_version`。
+- **路由接入、生命周期集成与日志净化 (`src/api/routes/system.py`, `src/api/main.py`, `src/logic/platform_log_filter.py`)**:
+  - `src/api/routes/system.py` 新增 `GET /system/stats`（对外路径 `GET /interface/system/stats`），沿用 `src/core/response.py` 的 `success()` 统一响应包装与 `require_token` Bearer Token 鉴权；
+  - `src/api/main.py` 在 `lifespan` 中统一托管 `system_monitor.start()` 与优雅关闭 `system_monitor.stop()`（自动释放 NVML 资源）；
+  - `src/logic/platform_log_filter.py` 扩展 `PlatformNoiseFilter`，过滤 `/interface/system/stats` 的正常 `200` 高频轮询访问日志（异常状态码照常打印）；
+  - `requirements.txt` 新增 `nvidia-ml-py>=12.535.0`。
+
+---
+
 ## [v1.6.0] - 2026-11-15
 
 ### 🦙 LlamaSwap 算力调度中枢接入、大模型零配置动态自发现与端口冲突强杀增强

@@ -15,6 +15,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from src.logic.yaml_config_loader import yaml_config_loader
 from src.logic.task_cleanup import start_cleanup_thread
+from src.logic.system_monitor import system_monitor
 from src.core.scheduler import scheduler
 from src.core.ws_manager import ws_manager
 from src.logic.logger import log
@@ -26,10 +27,12 @@ from src.core.security import WebSocketAuthMiddleware, require_token, require_pr
 async def lifespan(app: FastAPI):
     log.success("[Kalm] Starting up...")
     start_cleanup_thread()
+    system_monitor.start()
     ws_manager.loop = asyncio.get_running_loop()
     yield
     ws_manager.close_all()
     log.info("[Kalm] Shutting down...")
+    system_monitor.stop()
     scheduler.shutdown()
     await file_proxy.close_client()
     log.success("[Kalm] Shutdown complete.")

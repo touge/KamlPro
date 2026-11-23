@@ -16,6 +16,10 @@ class PlatformNoiseFilter(logging.Filter):
         # 1. 拦截特定的 HTTP 路径
         if "/api/jobs" in msg:
             return False
+
+        # 过滤高频监控轮询的正常 200 访问日志（异常状态码仍正常打印）
+        if "/interface/system/stats" in msg and " 200" in msg:
+            return False
             
         # 2. 拦截特定的 WebSocket 握手请求（排除你自己的 /interface 路径）
         if "WebSocket /ws" in msg and "/interface" not in msg:
