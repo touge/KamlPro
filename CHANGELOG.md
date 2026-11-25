@@ -1,5 +1,19 @@
 # Changelog
 
+## [v1.7.1] - 2026-11-25
+
+### 🚀 `/interface/system/stats` 分层低功耗扩展（磁盘、GPU 进阶遥测、CPU 主频/温度、实体网卡与环境标识）
+
+在保证极低后台采集消耗的前提下，扩展 `SystemMonitor`（`src/logic/system_monitor.py`）的数据维度与跨平台准确性：
+
+- **分层采样防高耗架构 (`src/logic/system_monitor.py`)**:
+  - **静态层（启动一次，0 运行时开销）**：`server.os_version`、`server.arch`（统一 `AMD64 -> x86_64`）、`server.python_version`、`server.pytorch_version`（仅读 `importlib.metadata` 元数据，绝不 `import torch`）；
+  - **低频层（每 60 秒）**：`disks` 物理磁盘分区（自动跳过 `cdrom`、虚拟文件系统及无权限盘符）、`server.ip_addresses` 与 `network.link_speed_mbps`（通过 `_is_physical_nic()` 严格过滤回环、`vEthernet`、`docker`、`singbox`/`tun` 等虚拟网卡，杜绝假速率与虚拟 IP 污染）；
+  - **中频层（每 12 秒）**：`gpus[].processes`（合并去重后基于 `nvmlSystemGetProcessName` 轻量获取前 15 个占卡进程，避免批量扫全系统进程）；
+  - **高频层（每 3 秒）**：`cpu` 补充 `freq_mhz` / `freq_max_mhz` / `temperature_c`（Linux 读传感器，Windows 置 `null`）及跨平台不可采集时置 `null` 的 `load_avg`；`gpus[]` 补充 `memory_utilization_percent`、`fan_speed_percent`、`clock_graphics_mhz`、`clock_memory_mhz`；`network` 补充网关启动以来的累计流量 `rx_total_gb` / `tx_total_gb`。
+
+---
+
 ## [v1.7.0] - 2026-11-23
 
 ### 📊 新增宿主机与 GPU 实时监控接口 (`GET /interface/system/stats`)
