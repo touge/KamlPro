@@ -20,7 +20,7 @@ tasks:
     service: "ComfyUI"            # 对应 services.yaml 中的 ComfyUI 通用服务定义 (自动命中平台脚本)
     track_mode: ws                # WebSocket 模式：实时接收生成进度和结果
     executor:
-      module: "src.core.executors.image"
+      module: "src.core.executors.comfyui"
       function: "execute"
 
   # --------------------------------------------------------------------------

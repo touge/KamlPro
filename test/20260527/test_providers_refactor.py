@@ -22,7 +22,7 @@ from src.core.providers.llm.manager import llm_provider_manager
 from src.core.providers.image.manager import image_provider_manager
 from src.core.providers.audio.manager import audio_provider_manager
 
-from src.core.executors.image import execute as execute_image
+from src.core.executors.comfyui import execute as execute_image
 from src.core.executors.tts import execute as execute_tts
 from src.core.executors.subtitle import execute as execute_subtitle
 

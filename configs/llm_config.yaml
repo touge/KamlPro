@@ -17,44 +17,44 @@
 providers:
   # 🟢 本地离线推理服务 (Ollama)
   # （服务开关、端口与后台子进程统一由 configs/services.yaml 控制）
-  ollama:
-    type: "ollama"
-    tier: "local"                  # 👈 提权：该 Provider 下所有模型默认走本地 GPU 串行队列
-    modalities: ["text"]           # 👈 该组默认模态为纯文本
-    base_url: "http://127.0.0.1:11434"
-    api_key: ""
-    models:
-      - name: "gemma3:12b"
-        enabled: true
-        display_name: "Gemma 3 (本地 / 12B)"
-        modalities: ["text"]
-      - name: "qwen3:14b"
-        enabled: true
-        display_name: "通义千问 3 (本地 / 14B)"
-        modalities: ["text"]
-      - name: "orcarouter/Qwen3.8-27B-Uncensored:q3_K_M"
-        enabled: true
-        display_name: "通义千问3.8 27B (本地)"
-        modalities: ["text", "vision"]  # 🌟 核心：具备视觉理解能力！
+  # ollama:
+  #   type: "ollama"
+  #   tier: "local"                  # 👈 提权：该 Provider 下所有模型默认走本地 GPU 串行队列
+  #   modalities: ["text"]           # 👈 该组默认模态为纯文本
+  #   base_url: "http://127.0.0.1:11434"
+  #   api_key: ""
+  #   models:
+  #     - name: "gemma3:12b"
+  #       enabled: true
+  #       display_name: "Gemma 3 (本地 / 12B)"
+  #       modalities: ["text"]
+  #     - name: "qwen3:14b"
+  #       enabled: true
+  #       display_name: "通义千问 3 (本地 / 14B)"
+  #       modalities: ["text"]
+  #     - name: "orcarouter/Qwen3.8-27B-Uncensored:q3_K_M"
+  #       enabled: true
+  #       display_name: "通义千问3.8 27B (本地)"
+  #       modalities: ["text", "vision"]  # 🌟 核心：具备视觉理解能力！
 
   # 🔵 线上 DeepSeek 官方 API (兼容 OpenAI 接口协议)
   # （纯远程 API，开关在此处通过 enabled 字段控制）
-  deepseek:
-    enabled: true                  # 🟢 设为 false 即可禁用此远程 API 提供商
-    type: "openai_compatible"
-    tier: "api"                    # 👈 提权：该 Provider 下所有模型默认走云端并发队列
-    modalities: ["text"]
-    base_url: "https://api.deepseek.com"
-    api_key: "${DEEPSEEK_API_KEY}"
-    models:
-      - name: "deepseek-v4-flash"
-        enabled: true
-        display_name: "DeepSeek V4 Flash (极速)"
-        modalities: ["text"]
-      - name: "deepseek-v4-pro"
-        enabled: true
-        display_name: "DeepSeek V4 Pro (高保真)"
-        modalities: ["text"]
+  # deepseek:
+  #   enabled: true                  # 🟢 设为 false 即可禁用此远程 API 提供商
+  #   type: "openai_compatible"
+  #   tier: "api"                    # 👈 提权：该 Provider 下所有模型默认走云端并发队列
+  #   modalities: ["text"]
+  #   base_url: "https://api.deepseek.com"
+  #   api_key: "${DEEPSEEK_API_KEY}"
+  #   models:
+  #     - name: "deepseek-v4-flash"
+  #       enabled: true
+  #       display_name: "DeepSeek V4 Flash (极速)"
+  #       modalities: ["text"]
+  #     - name: "deepseek-v4-pro"
+  #       enabled: true
+  #       display_name: "DeepSeek V4 Pro (高保真)"
+  #       modalities: ["text"]
 
   # 🟠 本地 llama-swap 调度中枢 (动态发现模型，显存自动按需管理)
   # （端口与地址自动从 services.yaml 中获取，模型列表自动从 llama-swap 动态拉取）

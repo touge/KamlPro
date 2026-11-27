@@ -562,7 +562,7 @@ class TestSingleTrackQueue(unittest.TestCase):
 
     def test_15_comfyui_progress_monotonic_no_rollback(self):
         """测试 15: ComfyUI 生图单轨任务进度单调递增保障，杜绝单节点局部 step 倒退冲垮全局 task_progress"""
-        from src.core.executors.image import execute as execute_image
+        from src.core.executors.comfyui import execute as execute_image
         from unittest.mock import patch, MagicMock
 
         mock_ws = MagicMock()

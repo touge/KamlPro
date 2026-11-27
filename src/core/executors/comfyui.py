@@ -20,19 +20,19 @@ def execute(task_id: str, **payload):
       - workflow: dict — ComfyUI 工作流 JSON
       - final_output_node_id: str — 输出节点 ID
       - client_id: str (可选) — WebSocket 客户端标识
-      - provider: str (可选) — 图像生成服务提供商，默认为 'comfyui'
+      - provider: str (可选) — 生成服务提供商，默认为 'comfyui'
     """
     payload["task_id"] = task_id
     provider_type = payload.get("provider", "comfyui")
 
     try:
-        log.info(f"[Image Executor] >>> task_id={task_id} 初始化生图任务...")
-        TaskManager.update_task(task_id, TaskManager.STATUS_RUNNING, {"message": "Initializing image generation..."})
+        log.info(f"[Comfyui Executor] >>> task_id={task_id} 初始化Comfyui任务...")
+        TaskManager.update_task(task_id, TaskManager.STATUS_RUNNING, {"message": "Initializing comfyui generation..."})
         
         provider = image_provider_manager.get_provider(provider_type)
 
         def progress_callback(raw_message: dict):
-            """将生图实时进度消息透传到 TaskManager 和前端 WS (双轨兼容与单轨节流)"""
+            """将ComfyUI任务实时进度消息透传到 TaskManager 和前端 WS (双轨兼容与单轨节流)"""
             TaskManager.update_task(task_id, TaskManager.STATUS_RUNNING, result=raw_message)
             # 旧通道受 ws_manager.send 内部 300ms 节流保护
             ws_manager.send(task_id, raw_message)
@@ -80,21 +80,21 @@ def execute(task_id: str, **payload):
                     interval=0.3
                 )
 
-        log.info(f"[Image Executor] >>> task_id={task_id} 委托给提供商 '{provider_type}' 执行生图...")
+        log.info(f"[ComfyUI Executor] >>> task_id={task_id} 委托给提供商 '{provider_type}' 执行ComfyUI任务...")
         final_outputs = provider.generate_image(payload, progress_callback)
-        log.info(f"[Image Executor] >>> task_id={task_id} 生图任务执行成功")
+        log.info(f"[ComfyUI Executor] >>> task_id={task_id} ComfyUI任务执行成功")
 
         TaskManager.update_task(task_id, TaskManager.STATUS_SUCCESS, result={
-            "message": "Image generation completed",
+            "message": "ComfyUI generation completed",
             "outputs": final_outputs,
         })
         ws_manager.send(task_id, {"type": "task_complete", "status": "success",
-            "message": "Image generation completed", "outputs": final_outputs})
+            "message": "ComfyUI generation completed", "outputs": final_outputs})
 
     except Exception as e:
         if "任务已被用户手动停止" in str(e):
-            log.info(f"[Image Executor] >>> task_id={task_id} 任务已被用户手动停止。")
+            log.info(f"[ComfyUI Executor] >>> task_id={task_id} 任务已被用户手动停止。")
         else:
-            log.error(f"[Image Executor] >>> task_id={task_id} 执行失败: {e}", exc_info=True)
+            log.error(f"[ComfyUI Executor] >>> task_id={task_id} 执行失败: {e}", exc_info=True)
         TaskManager.update_task(task_id, TaskManager.STATUS_FAILED, {"message": str(e)})
         ws_manager.send(task_id, {"type": "task_failed", "message": str(e)})

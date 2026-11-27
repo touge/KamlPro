@@ -102,7 +102,7 @@ ComfyUI:
   platforms:
     windows:
       type: cmd
-      path: "D:/AIGC/ComfyUI/developer-260711/launcher.bat"    
+      path: "D:/AIGC/KalmComputingCenter/ComfyUI/launcher.bat"    
     linux:
       type: sh
       path: "/root/workspace/comfyui/KamlPro-service/launcher.sh"
@@ -131,7 +131,7 @@ TTS:
   platforms:
     windows:
       type: cmd
-      path: "D:/AIGC/TTS/IndexTTS-API/launcher.bat"
+      path: "D:/AIGC/KalmComputingCenter/IndexTTS-API/launcher.bat"
       
     linux:
       type: sh
